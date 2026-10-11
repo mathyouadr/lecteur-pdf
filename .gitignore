@@ -1,0 +1,7 @@
+# Données de production : base, comptes, PDF importés
+donnees/
+
+__pycache__/
+*.pyc
+.superpowers/
+.playwright-mcp/

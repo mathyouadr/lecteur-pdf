@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bibliothèque · Lecteur</title>
+<link rel="stylesheet" href="/style.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 32 32%27%3E%3Cdefs%3E%3ClinearGradient id=%27g%27%3E%3Cstop stop-color=%27%23f08a4b%27/%3E%3Cstop offset=%271%27 stop-color=%27%23c4378f%27/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width=%2732%27 height=%2732%27 rx=%279%27 fill=%27url(%23g)%27/%3E%3C/svg%3E">
+</head>
+<body>
+<header class="entete">
+  <div class="barre">
+    <a class="marque" href="/bibliotheque.html">Lecteur</a>
+    <span class="discret" id="moi"></span>
+    <a class="lien" href="/stats.html">Stats</a>
+    <a class="lien" id="lien-admin" href="/admin.html" hidden>Admin</a>
+    <button class="lien" onclick="deconnexion()">Déconnexion</button>
+  </div>
+</header>
+<main class="page">
+  <section id="zone-reprendre" hidden></section>
+  <h2>Ma bibliothèque</h2>
+  <div class="message" id="message" role="status"></div>
+  <div class="grille" id="grille"></div>
+  <div class="vide" id="vide" hidden>
+    <div>Ta bibliothèque est vide.</div>
+    <div>Glisse un PDF n'importe où sur la page, ou</div>
+    <button class="principal" onclick="$('fichier').click()">Ajouter un PDF</button>
+  </div>
+</main>
+<input id="fichier" type="file" accept="application/pdf" multiple hidden>
+<div id="depot-global">Dépose tes PDF ici</div>
+<script src="/commun.js"></script>
+<script>
+const MAX = 50 * 1024 * 1024;
+let enImport = 0;
+
+api("/api/moi").then(m => {
+  $("moi").textContent = m.identifiant;
+  $("lien-admin").hidden = !m.admin;
+});
+
+async function charger() {
+  const livres = await api("/api/livres");
+  afficherReprendre(livres.find(l => l.lu_le && l.phrase < l.total));
+  const grille = $("grille");
+  grille.replaceChildren(...livres.map(tuile), tuileAjout());
+  $("vide").hidden = livres.length > 0 || enImport > 0;
+  grille.hidden = !$("vide").hidden;
+}
+
+function afficherReprendre(l) {
+  const zone = $("zone-reprendre");
+  zone.hidden = !l;
+  if (!l) return;
+  const a = document.createElement("a");
+  a.className = "reprendre";
+  a.href = `/lecteur.html?livre=${l.id}`;
+  const infos = document.createElement("div");
+  infos.className = "infos";
+  infos.innerHTML = `<div class="sur">Reprendre la lecture</div><div class="titre"></div><div class="discret"></div>`;
+  infos.querySelector(".titre").textContent = l.titre;
+  infos.querySelector(".discret").textContent = `${Math.round(pourcent(l) * 100)} % · ${vitesseTexte(l.vitesse)}`;
+  infos.append(barre(pourcent(l)));
+  const play = document.createElement("div");
+  play.className = "lecture-btn";
+  play.textContent = "▶";
+  play.setAttribute("aria-hidden", "true");
+  a.append(couverture(l.titre), infos, play);
+  zone.replaceChildren(a);
+}
+
+function tuile(l) {
+  const a = document.createElement("a");
+  a.className = "livre";
+  a.href = `/lecteur.html?livre=${l.id}`;
+  const c = couverture(l.titre);
+  c.append(barre(pourcent(l)));
+  const nom = document.createElement("div");
+  nom.className = "nom";
+  nom.textContent = l.titre;
+  nom.title = l.titre;
+  const etat = document.createElement("div");
+  etat.className = "etat";
+  const p = pourcent(l);
+  etat.textContent = p >= 1 ? "Terminé" : l.lu_le ? `${Math.round(p * 100)} %` : "Nouveau";
+  const suppr = document.createElement("button");
+  suppr.className = "suppr";
+  suppr.textContent = "✕";
+  suppr.setAttribute("aria-label", `Supprimer ${l.titre}`);
+  suppr.onclick = async e => {
+    e.preventDefault();
+    if (!confirm(`Supprimer « ${l.titre} » de ta bibliothèque ?`)) return;
+    await api(`/api/livres/${l.id}`, { method: "DELETE" });
+    charger();
+  };
+  a.append(suppr, c, nom, etat);
+  return a;
+}
+
+function tuileAjout() {
+  const div = document.createElement("div");
+  const b = document.createElement("button");
+  b.className = "ajout" + (enImport ? " charge" : "");
+  b.innerHTML = enImport ? `<b>…</b><span>Import en cours</span>` : `<b>+</b><span>Ajouter un PDF</span>`;
+  b.disabled = enImport > 0;
+  b.onclick = () => $("fichier").click();
+  div.append(b);
+  return div;
+}
+
+async function importer(fichiers) {
+  const pdfs = [...fichiers].filter(f => f.type === "application/pdf" || /\.pdf$/i.test(f.name));
+  if (!pdfs.length) return;
+  enImport = pdfs.length;
+  charger();
+  const erreurs = [];
+  for (const f of pdfs) {
+    try {
+      if (f.size > MAX) throw new Error("fichier trop gros (50 Mo maximum)");
+      await api("/api/livres", { method: "POST", headers: { "Content-Type": "application/pdf", "X-Nom": encodeURIComponent(f.name) }, body: f });
+    } catch (err) {
+      erreurs.push(`${f.name} : ${err.message}`);
+    }
+    enImport--;
+    charger();
+  }
+  $("message").textContent = erreurs.join(" · ");
+  $("message").className = "message" + (erreurs.length ? " erreur" : "");
+}
+
+$("fichier").onchange = e => { importer(e.target.files); e.target.value = ""; };
+
+// Glisser-déposer n'importe où sur la page
+let profondeur = 0;
+addEventListener("dragenter", e => { e.preventDefault(); profondeur++; document.body.classList.add("survol"); });
+addEventListener("dragleave", () => { if (--profondeur <= 0) { profondeur = 0; document.body.classList.remove("survol"); } });
+addEventListener("dragover", e => e.preventDefault());
+addEventListener("drop", e => {
+  e.preventDefault();
+  profondeur = 0;
+  document.body.classList.remove("survol");
+  importer(e.dataTransfer.files);
+});
+
+charger();
+</script>
+</body>
+</html>

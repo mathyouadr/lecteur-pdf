@@ -1,0 +1,230 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Statistiques · Lecteur</title>
+<link rel="stylesheet" href="/style.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 32 32%27%3E%3Cdefs%3E%3ClinearGradient id=%27g%27%3E%3Cstop stop-color=%27%23f08a4b%27/%3E%3Cstop offset=%271%27 stop-color=%27%23c4378f%27/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width=%2732%27 height=%2732%27 rx=%279%27 fill=%27url(%23g)%27/%3E%3C/svg%3E">
+</head>
+<body>
+<header class="entete">
+  <div class="barre">
+    <a class="marque" href="/bibliotheque.html">Lecteur</a>
+    <a class="lien" href="/bibliotheque.html">← Bibliothèque</a>
+  </div>
+</header>
+<main class="page stats">
+  <div class="titre-stats">
+    <h1>Statistiques</h1>
+    <label class="discret" id="choix-zone" hidden>Voir
+      <select id="choix"></select>
+    </label>
+  </div>
+  <div class="message" id="message" role="status"></div>
+
+  <section class="hero-stat">
+    <div class="discret">Temps d'écoute total</div>
+    <div class="hero-valeur" id="h-total">–</div>
+    <div class="discret" id="h-depuis"></div>
+  </section>
+
+  <section class="tuiles" id="tuiles"></section>
+
+  <h2>Minutes d'écoute par jour</h2>
+  <p class="discret sous-titre">30 derniers jours</p>
+  <div class="graphe" id="graphe"></div>
+  <details class="tableau-brut"><summary>Voir les données</summary><table id="table-jours"></table></details>
+
+  <h2>Livres les plus écoutés</h2>
+  <div id="classement"></div>
+
+  <section id="zone-admin" hidden>
+    <h2>Tous les utilisateurs</h2>
+    <div class="defile"><table class="tableau" id="table-admin"></table></div>
+  </section>
+</main>
+<div class="infobulle" id="infobulle" role="tooltip" hidden></div>
+<script src="/commun.js"></script>
+<script>
+const moisCourt = new Intl.DateTimeFormat("fr-FR", { day: "numeric", month: "short" });
+const dateLongue = new Intl.DateTimeFormat("fr-FR", { dateStyle: "long" });
+const nombre = new Intl.NumberFormat("fr-FR");
+const jourDe = iso => new Date(iso + "T12:00:00");
+
+function duree(secondes) {
+  const min = Math.round(secondes / 60);
+  if (min < 60) return `${min} min`;
+  const h = Math.floor(min / 60), m = min % 60;
+  return m ? `${h} h ${String(m).padStart(2, "0")}` : `${h} h`;
+}
+
+let moi;
+
+async function demarrer() {
+  moi = await api("/api/moi");
+  if (moi.admin) {
+    const comptes = await api("/api/admin/stats");
+    const options = [["tous", "Tout le monde"], [String(moi.id), `Moi (${moi.identifiant})`],
+                     ...comptes.filter(c => c.id !== moi.id).map(c => [String(c.id), c.identifiant])];
+    $("choix").replaceChildren(...options.map(([v, t]) => new Option(t, v)));
+    $("choix").value = "tous";
+    $("choix").onchange = () => charger($("choix").value);
+    $("choix-zone").hidden = false;
+    tableAdmin(comptes);
+    $("zone-admin").hidden = false;
+    charger("tous");
+  } else {
+    charger(String(moi.id));
+  }
+}
+
+async function charger(cible) {
+  let s;
+  try { s = await api(`/api/stats?utilisateur=${encodeURIComponent(cible)}`); }
+  catch (err) { $("message").textContent = err.message; $("message").className = "message erreur"; return; }
+  $("h-total").textContent = duree(s.secondes);
+  $("h-depuis").textContent = s.depuis ? `mesuré depuis le ${dateLongue.format(jourDe(s.depuis))}` : "aucune écoute enregistrée pour l'instant";
+  tuiles([
+    ["7 derniers jours", duree(s.secondes_7j)],
+    ["Livres", nombre.format(s.livres)],
+    ["En cours", nombre.format(s.en_cours)],
+    ["Terminés", nombre.format(s.termines)],
+    ["Phrases écoutées", nombre.format(s.phrases)],
+    ["Jours d'affilée", nombre.format(s.serie)],
+    ["Jours actifs", nombre.format(s.jours_actifs)],
+  ]);
+  graphe(s.par_jour);
+  classement(s.par_livre);
+}
+
+function tuiles(liste) {
+  $("tuiles").replaceChildren(...liste.map(([libelle, valeur]) => {
+    const d = document.createElement("div");
+    d.className = "tuile";
+    d.innerHTML = `<div class="discret"></div><div class="valeur"></div>`;
+    d.children[0].textContent = libelle;
+    d.children[1].textContent = valeur;
+    return d;
+  }));
+}
+
+// ---------- Colonnes par jour (SVG) ----------
+function graduations(max) {
+  const brut = max / 3;
+  const puissance = 10 ** Math.floor(Math.log10(brut || 1));
+  const pas = [1, 2, 5, 10].map(k => k * puissance).find(p => p >= brut) || 1;
+  return [0, pas, pas * 2, pas * 3];
+}
+
+function graphe(jours) {
+  const zone = $("graphe");
+  const minutes = jours.map(j => j.secondes / 60);
+  const ticks = graduations(Math.max(...minutes, 1));
+  const haut = ticks.at(-1);
+  const L = zone.clientWidth || 600, H = 220, g = 34, b = 26, t = 8;
+  const pas = (L - g) / jours.length;
+  const larg = Math.min(24, pas - 2);
+  const y = v => t + (H - t - b) * (1 - v / haut);
+  const ns = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(ns, "svg");
+  svg.setAttribute("viewBox", `0 0 ${L} ${H}`);
+  svg.setAttribute("role", "img");
+  svg.setAttribute("aria-label", "Minutes d'écoute par jour sur les 30 derniers jours");
+  const el = (nom, attrs, texte) => {
+    const e = document.createElementNS(ns, nom);
+    for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, v);
+    if (texte != null) e.textContent = texte;
+    svg.append(e);
+    return e;
+  };
+  for (const v of ticks) {
+    el("line", { x1: g, x2: L, y1: y(v), y2: y(v), class: v ? "grille" : "base" });
+    el("text", { x: g - 6, y: y(v) + 4, class: "axe", "text-anchor": "end" }, nombre.format(v));
+  }
+  jours.forEach((j, i) => {
+    const x = g + i * pas + (pas - larg) / 2;
+    const m = minutes[i];
+    if (m > 0) {
+      const top = y(m), bas = y(0), r = Math.min(4, (bas - top) / 2, larg / 2);
+      el("path", { class: "colonne", d: `M${x},${bas} V${top + r} Q${x},${top} ${x + r},${top} H${x + larg - r} Q${x + larg},${top} ${x + larg},${top + r} V${bas} Z` });
+    }
+    if (i % 7 === 2 || i === jours.length - 1) {
+      el("text", { x: x + larg / 2, y: H - 8, class: "axe", "text-anchor": "middle" }, moisCourt.format(jourDe(j.jour)));
+    }
+    // Zone de survol : toute la hauteur de la tranche, plus large que la colonne
+    const cible = el("rect", { x: g + i * pas, y: t, width: pas, height: H - t - b, class: "survol" });
+    cible.addEventListener("pointerenter", e => infobulle(e, `${moisCourt.format(jourDe(j.jour))} · ${duree(j.secondes)}`));
+    cible.addEventListener("pointermove", e => infobulle(e));
+    cible.addEventListener("pointerleave", () => { $("infobulle").hidden = true; });
+  });
+  zone.replaceChildren(svg);
+
+  $("table-jours").innerHTML = "<thead><tr><th>Jour</th><th>Écoute</th></tr></thead>";
+  const corps = document.createElement("tbody");
+  for (const j of jours) corps.insertRow().append(...[dateLongue.format(jourDe(j.jour)), duree(j.secondes)].map(cellule));
+  $("table-jours").append(corps);
+}
+
+function infobulle(e, texte) {
+  const bulle = $("infobulle");
+  if (texte) bulle.textContent = texte;
+  bulle.hidden = false;
+  const x = Math.min(e.clientX + 14, innerWidth - bulle.offsetWidth - 8);
+  bulle.style.left = `${x}px`;
+  bulle.style.top = `${e.clientY - bulle.offsetHeight - 12}px`;
+}
+
+function cellule(texte) {
+  const td = document.createElement("td");
+  td.textContent = texte;
+  return td;
+}
+
+// ---------- Classement des livres (barres horizontales) ----------
+function classement(livres) {
+  const zone = $("classement");
+  if (!livres.length) {
+    zone.innerHTML = `<div class="discret">Rien encore : lance la lecture d'un livre.</div>`;
+    return;
+  }
+  const max = livres[0].secondes;
+  zone.replaceChildren(...livres.map(l => {
+    const ligne = document.createElement("div");
+    ligne.className = "barre-livre";
+    ligne.innerHTML = `<div class="nom"></div><div class="piste"><i></i><span></span></div>`;
+    ligne.querySelector(".nom").textContent = l.titre;
+    ligne.querySelector(".nom").title = l.titre;
+    ligne.querySelector("i").style.width = `${Math.max(1, (l.secondes / max) * 100)}%`;
+    ligne.querySelector("span").textContent = duree(l.secondes);
+    return ligne;
+  }));
+}
+
+// ---------- Tableau admin ----------
+function tableAdmin(comptes) {
+  const table = $("table-admin");
+  table.innerHTML = `<thead><tr><th>Utilisateur</th><th class="n">Écoute totale</th><th class="n">7 jours</th>
+    <th class="n">Livres</th><th class="n">Terminés</th><th>Dernière activité</th></tr></thead>`;
+  const corps = document.createElement("tbody");
+  for (const c of comptes) {
+    const tr = corps.insertRow();
+    tr.tabIndex = 0;
+    tr.title = `Voir les stats de ${c.identifiant}`;
+    tr.append(...[c.identifiant, duree(c.secondes), duree(c.secondes_7j), nombre.format(c.livres), nombre.format(c.termines),
+                  c.derniere ? dateLongue.format(new Date(c.derniere * 1000)) : "—"].map(cellule));
+    [...tr.cells].slice(1, 5).forEach(td => td.className = "n");
+    const voir = () => { $("choix").value = String(c.id); charger(String(c.id)); scrollTo({ top: 0, behavior: "smooth" }); };
+    tr.onclick = voir;
+    tr.onkeydown = e => { if (e.key === "Enter") voir(); };
+  }
+  table.append(corps);
+}
+
+let attente;
+addEventListener("resize", () => { clearTimeout(attente); attente = setTimeout(() => $("choix-zone").hidden ? charger(String(moi.id)) : charger($("choix").value), 200); });
+
+demarrer();
+</script>
+</body>
+</html>
