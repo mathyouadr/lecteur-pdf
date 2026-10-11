@@ -1,6 +1,6 @@
 # Lecteur
 
-Un lecteur de PDF à voix haute, auto-hébergé. On importe ses livres en PDF, on clique une phrase, et la voix de Google Traduction (accent de France) lit la suite en surlignant chaque phrase. La lecture reprend là où on s'était arrêté, sur n'importe quel appareil.
+Un lecteur de PDF à voix haute, auto-hébergé. On importe ses livres en PDF, on clique sur une phrase, et la voix de Google Traduction (accent de France) lit la suite pendant que chaque phrase est surlignée. La lecture reprend là où on s'était arrêté, sur n'importe quel appareil.
 
 L'accès est fermé : chacun peut demander un compte, mais seul l'administrateur peut le valider.
 
@@ -9,11 +9,11 @@ L'accès est fermé : chacun peut demander un compte, mais seul l'administrateur
 ## Fonctionnalités
 
 - **Bibliothèque personnelle** : chaque compte a ses propres livres, avec une couverture générée à partir du titre et une barre de progression. Une carte « Reprendre la lecture » mène directement au dernier livre ouvert. Import par glisser-déposer, jusqu'à 50 Mo par PDF.
-- **Lecture à voix haute** : la phrase en cours est surlignée et suivie à l'écran. On clique n'importe quelle phrase pour lire à partir de là. Vitesse de 0,8× à 5×, sans changer la hauteur de la voix. Les deux phrases suivantes sont préparées à l'avance pour éviter les blancs.
-- **Progression enregistrée** : phrase atteinte et vitesse choisie sont sauvegardées pour chaque livre.
+- **Lecture à voix haute** : la phrase en cours est surlignée et suivie à l'écran. On clique sur n'importe quelle phrase pour lire à partir de là. Vitesse de 0,8× à 5×, sans changer la hauteur de la voix. Les deux phrases suivantes sont préparées à l'avance pour éviter les blancs.
+- **Progression enregistrée** : la phrase atteinte et la vitesse choisie sont sauvegardées pour chaque livre.
 - **Comptes validés par l'admin** : inscription libre, mais connexion impossible tant que l'admin n'a pas validé le compte. Une révocation déconnecte la personne immédiatement.
 - **Statistiques** : temps d'écoute réel (pauses exclues), minutes par jour sur 30 jours, livres en cours et terminés, jours d'affilée, livres les plus écoutés. Chacun voit les siennes ; l'admin voit celles de tout le monde.
-- **Extraction propre du texte** : les paragraphes sont reconstitués, les mots coupés en fin de ligne recollés, les numéros de page et les ligatures (ﬁ, ﬃ) nettoyés.
+- **Extraction propre du texte** : les paragraphes sont reconstitués, les mots coupés en fin de ligne recollés, les numéros de page supprimés et les ligatures (ﬁ, ﬃ) remplacées par les lettres correspondantes.
 
 ## Captures
 
@@ -47,7 +47,7 @@ Les autres comptes se créent depuis la page de connexion, puis se valident sur 
 
 ## Mise en production
 
-Le serveur n'écoute que sur `127.0.0.1:8765`. Pour l'exposer, placez-le derrière un proxy HTTPS et définissez `LECTEUR_HTTPS=1` : les cookies de session reçoivent alors le flag `Secure`.
+Le serveur n'écoute que sur `127.0.0.1:8765`. Pour l'exposer, placez-le derrière un proxy HTTPS et définissez `LECTEUR_HTTPS=1` : les cookies de session reçoivent alors l'attribut `Secure`.
 
 Exemple avec [Tailscale Funnel](https://tailscale.com/kb/1223/funnel), qui fournit une adresse HTTPS publique sans ouvrir de port :
 
@@ -80,7 +80,7 @@ PrivateTmp=yes
 WantedBy=multi-user.target
 ```
 
-Toutes les données vivent dans `donnees/` : la base SQLite `lecteur.db` et les PDF importés dans `livres/`. Sauvegarder ce dossier suffit. La base est créée et mise à jour automatiquement au démarrage.
+Toutes les données sont stockées dans `donnees/` : la base SQLite `lecteur.db` et les PDF importés dans `livres/`. Sauvegarder ce dossier suffit. La base est créée et mise à jour automatiquement au démarrage.
 
 ## Sécurité
 
