@@ -117,7 +117,7 @@ def nouvelle_demande():
 
 def etat_public():
     return {"configure": actif(), "wol": bool(SRV02_MAC), "extinction": extinction_possible(),
-            "voicestudio": voicestudio_pret(), "manuel": etat["manuel"], "reveil_auto": etat["reveil_auto"],
+            "voicestudio": voicestudio_pret(recent=10), "manuel": etat["manuel"], "reveil_auto": etat["reveil_auto"],
             "message": etat["message"], "file": base.file_audio()}
 
 

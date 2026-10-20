@@ -90,6 +90,11 @@ COLONNES_LIVRES = {
     "audio_faits": "INTEGER NOT NULL DEFAULT 0",
     "audio_erreur": "TEXT",
 }
+COLONNES_UTILISATEURS = {
+    "connecte_le": "INTEGER",              # dernière connexion (mot de passe saisi)
+    "nouveautes": "INTEGER NOT NULL DEFAULT 0",   # dernière présentation des nouveautés vue
+}
+VERSION_NOUVEAUTES = 1   # à augmenter quand une nouvelle présentation doit s'afficher pour tout le monde
 
 
 def _sql(requete, params=()):
@@ -110,10 +115,11 @@ def initialiser():
         dossier.mkdir(parents=True, exist_ok=True)
     c = sqlite3.connect(BASE)
     c.executescript(SCHEMA)
-    existantes = {l[1] for l in c.execute("PRAGMA table_info(livres)")}
-    for nom, definition in COLONNES_LIVRES.items():
-        if nom not in existantes:
-            c.execute(f"ALTER TABLE livres ADD COLUMN {nom} {definition}")
+    for table, colonnes in (("livres", COLONNES_LIVRES), ("utilisateurs", COLONNES_UTILISATEURS)):
+        existantes = {l[1] for l in c.execute(f"PRAGMA table_info({table})")}
+        for nom, definition in colonnes.items():
+            if nom not in existantes:
+                c.execute(f"ALTER TABLE {table} ADD COLUMN {nom} {definition}")
     # Livres importés avant le découpage serveur : on découpe, et on recale la phrase atteinte
     # (l'ancien découpage du navigateur ne tombait pas exactement aux mêmes endroits)
     for lid, paras, phrase, total in c.execute(
@@ -177,7 +183,31 @@ def authentifier(identifiant, mdp):
 
 
 def utilisateurs():
-    return _sql("SELECT id, identifiant, statut, admin, cree_le FROM utilisateurs ORDER BY cree_le DESC")[0]
+    """Comptes, avec de quoi les gérer depuis le panel : livres, place sur le disque, positions gardées."""
+    comptes = _sql("""SELECT u.id, u.identifiant, u.statut, u.admin, u.cree_le, u.connecte_le,
+                      (SELECT COUNT(*) FROM livres l WHERE l.utilisateur = u.id) livres,
+                      (SELECT COUNT(*) FROM positions_gardees p WHERE p.utilisateur = u.id) positions
+                      FROM utilisateurs u ORDER BY u.cree_le DESC""")[0]
+    octets = {}
+    for l in tous_les_livres():
+        octets[l["utilisateur"]] = octets.get(l["utilisateur"], 0) + l["octets"]
+    for c in comptes:
+        c["octets"] = octets.get(c["id"], 0)
+    return comptes
+
+
+def nouveautes_vues(uid):
+    _sql("UPDATE utilisateurs SET nouveautes = ? WHERE id = ?", (VERSION_NOUVEAUTES, uid))
+
+
+def supprimer_livres_de(uid):
+    """Tous les livres d'un compte (PDF, couvertures, livres audio), le compte reste."""
+    for l in _sql("SELECT id FROM livres WHERE utilisateur = ?", (uid,))[0]:
+        supprimer_livre(None, l["id"])
+
+
+def supprimer_positions_gardees(uid):
+    _sql("DELETE FROM positions_gardees WHERE utilisateur = ?", (uid,))
 
 
 def definir_statut(uid, statut):
@@ -202,13 +232,16 @@ def ouvrir_session(uid):
     jeton = secrets.token_urlsafe(32)
     _sql("DELETE FROM sessions WHERE expire < ?", (int(time.time()),))
     _sql("INSERT INTO sessions VALUES (?, ?, ?)", (jeton, uid, int(time.time()) + DUREE_SESSION))
+    _sql("UPDATE utilisateurs SET connecte_le = ? WHERE id = ?", (int(time.time()), uid))
     return jeton
 
 
 def compte_de_session(jeton):
     """Compte validé lié à ce jeton, ou None."""
-    lignes, _ = _sql("""SELECT u.id, u.identifiant, u.admin FROM sessions s JOIN utilisateurs u ON u.id = s.utilisateur
-                        WHERE s.jeton = ? AND s.expire > ? AND u.statut = 'valide'""", (jeton, int(time.time())))
+    lignes, _ = _sql("""SELECT u.id, u.identifiant, u.admin, u.nouveautes < ? voir_nouveautes
+                        FROM sessions s JOIN utilisateurs u ON u.id = s.utilisateur
+                        WHERE s.jeton = ? AND s.expire > ? AND u.statut = 'valide'""",
+                     (VERSION_NOUVEAUTES, jeton, int(time.time())))
     return lignes[0] if lignes else None
 
 
@@ -295,6 +328,11 @@ def purger(maintenant=None):
         supprimer_livre(None, l["id"])
     _sql("DELETE FROM positions_gardees WHERE lu_le < ?", (maintenant - DUREE_PROGRESSION,))
     return len(vieux)
+
+
+def reinitialiser_progression(lid):
+    """Pour l'admin : le livre repart de la première phrase (le temps d'écoute des stats est gardé)."""
+    _sql("UPDATE livres SET phrase = 0 WHERE id = ?", (lid,))
 
 
 def sauver_progression(uid, lid, phrase, total, vitesse):
@@ -399,6 +437,12 @@ def annuler_audio(uid, lid):
 
 def compter_audio(lid):
     _sql("UPDATE livres SET audio_faits = ? WHERE id = ?", (len(_fichiers_audio(lid)), lid))
+
+
+def carte_audio(lid, total):
+    """Une lettre par phrase : 1 = audio IA en stock, 0 = pas encore (pour le ruban du lecteur)."""
+    faites = phrases_generees(lid)
+    return "".join("1" if n in faites else "0" for n in range(total))
 
 
 def phrases_generees(lid):

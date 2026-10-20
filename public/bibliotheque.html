@@ -11,232 +11,189 @@
 <header class="entete">
   <div class="barre">
     <a class="marque" href="/bibliotheque.html">Lecteur</a>
-    <span class="discret" id="moi"></span>
     <a class="lien" href="/stats.html">Stats</a>
     <a class="lien" id="lien-admin" href="/admin.html" hidden>Admin</a>
+    <span class="discret" id="moi"></span>
     <button class="lien" onclick="deconnexion()">Déconnexion</button>
   </div>
 </header>
 <main class="page">
   <section id="zone-reprendre" hidden></section>
-  <h2>Ma bibliothèque</h2>
-  <p class="discret">Un livre est supprimé 1 mois après ta dernière écoute. Ta position reste gardée 2 mois :
-    réimporte le même PDF pour reprendre là où tu en étais.</p>
-  <div class="message" id="message" role="status"></div>
-  <div class="grille" id="grille"></div>
-  <div class="vide" id="vide" hidden>
-    <div>Ta bibliothèque est vide.</div>
-    <div>Glisse un PDF n'importe où sur la page, ou</div>
+
+  <div class="outils">
+    <h1>Ma bibliothèque</h1>
+    <div class="filtres" role="group" aria-label="Filtrer les livres">
+      <button data-filtre="tous" aria-pressed="true">Tous</button>
+      <button data-filtre="encours" aria-pressed="false">En cours</button>
+      <button data-filtre="audio" aria-pressed="false">Livres audio</button>
+    </div>
     <button class="principal" onclick="$('fichier').click()">Ajouter un PDF</button>
   </div>
+
+  <div class="grille" id="grille"></div>
+  <div class="vide" id="vide" hidden>
+    <p>Ta bibliothèque est vide.</p>
+    <p class="discret">Glisse un PDF n'importe où sur la page, ou</p>
+    <button class="principal" onclick="$('fichier').click()">Ajouter un PDF</button>
+  </div>
+  <p class="discret note-duree">Un livre est supprimé 1 mois après ta dernière écoute. Ta position reste gardée 2 mois :
+    réimporte le même PDF pour reprendre là où tu en étais.</p>
 </main>
+
 <input id="fichier" type="file" accept="application/pdf" multiple hidden>
 <input id="image" type="file" accept="image/jpeg,image/png,image/webp" hidden>
 <div id="depot-global">Dépose tes PDF ici</div>
+
 <dialog id="choix-voix" aria-labelledby="choix-titre">
   <h2 id="choix-titre">Livre audio</h2>
-  <p class="discret">Choisis une voix. En attendant que l'IA ait fini, le livre se lit avec la voix Google,
-    puis la voix choisie prend le relais phrase par phrase.</p>
-  <div id="choix-liste"></div>
-  <div class="message" id="choix-message" role="status"></div>
-  <div class="reglage" style="margin-top:14px">
-    <button class="principal" id="choix-lancer">Lancer</button>
-    <button class="non" id="choix-supprimer" hidden>Supprimer le livre audio</button>
+  <p class="discret" id="choix-etat"></p>
+  <p class="discret">Écoute les voix, choisis-en une. Tu peux commencer à écouter tout de suite :
+    le livre se prépare devant toi, phrase par phrase.</p>
+  <div id="choix-liste" class="voix-liste" role="radiogroup" aria-label="Voix"></div>
+  <div class="pied">
+    <button id="choix-supprimer" class="lien danger" hidden>Supprimer le livre audio</button>
     <button id="choix-fermer">Fermer</button>
+    <button class="principal" id="choix-lancer">Créer le livre audio</button>
   </div>
 </dialog>
+
 <script src="/commun.js"></script>
 <script>
 const MAX = 50 * 1024 * 1024;
 const MAX_IMAGE = 5 * 1024 * 1024;
+let livres = [];
+let filtre = "tous";
 let enImport = 0;
 let livreImage = null;     // livre dont on change la couverture
-let rafraichir = null;     // minuterie tant qu'un livre audio est en cours de génération
-let catalogue = { actif: false, voix: [] };   // voix proposées pour les livres audio
+let rafraichir = null;     // minuterie tant qu'un livre audio se prépare
+let catalogue = { actif: false, voix: [] };
 const nomVoix = id => (catalogue.voix.find(v => v.id === id) || {}).nom;
+const audioEnCours = l => ["attente", "encours"].includes(l.audio_etat);
 
 api("/api/moi").then(m => {
   $("moi").textContent = m.identifiant;
   $("lien-admin").hidden = !m.admin;
+  if (m.voir_nouveautes) presenterNouveautes();
 });
 
 async function charger() {
-  const [livres, cat] = await Promise.all([api("/api/livres"), api("/api/voix")]);
-  catalogue = cat;
+  [livres, catalogue] = await Promise.all([api("/api/livres"), api("/api/voix")]);
   afficherReprendre(livres.find(l => l.lu_le && l.phrase < l.total));
+  afficherGrille();
+  clearTimeout(rafraichir);
+  if (livres.some(audioEnCours)) rafraichir = setTimeout(charger, 15000);
+}
+
+function afficherGrille() {
+  const visibles = livres.filter(l => filtre === "tous" || (filtre === "encours" ? l.lu_le && l.phrase < l.total : l.audio_etat));
   const grille = $("grille");
-  grille.replaceChildren(...livres.map(tuile), tuileAjout());
+  grille.replaceChildren(...visibles.map(tuile), ...(filtre === "tous" ? [tuileAjout()] : []));
   $("vide").hidden = livres.length > 0 || enImport > 0;
   grille.hidden = !$("vide").hidden;
-  clearTimeout(rafraichir);
-  if (livres.some(l => ["attente", "encours"].includes(l.audio_etat))) rafraichir = setTimeout(charger, 20000);
+  if (!visibles.length && livres.length) grille.replaceChildren(el("p", "discret", "Aucun livre ici pour l'instant."));
+}
+
+for (const b of document.querySelectorAll("[data-filtre]")) {
+  b.onclick = () => {
+    filtre = b.dataset.filtre;
+    document.querySelectorAll("[data-filtre]").forEach(x => x.setAttribute("aria-pressed", x === b));
+    afficherGrille();
+  };
 }
 
 function afficherReprendre(l) {
   const zone = $("zone-reprendre");
   zone.hidden = !l;
   if (!l) return;
-  const a = document.createElement("a");
-  a.className = "reprendre";
+  const a = el("a", "reprendre");
   a.href = `/lecteur.html?livre=${l.id}`;
-  const infos = document.createElement("div");
-  infos.className = "infos";
-  infos.innerHTML = `<div class="sur">Reprendre la lecture</div><div class="titre"></div><div class="discret"></div>`;
-  infos.querySelector(".titre").textContent = l.titre;
-  infos.querySelector(".discret").textContent = `${Math.round(pourcent(l) * 100)} % · ${vitesseTexte(l.vitesse)}`;
-  infos.append(barre(pourcent(l)));
-  const play = document.createElement("div");
-  play.className = "lecture-btn";
-  play.textContent = "▶";
+  const infos = el("div", "infos");
+  infos.append(el("div", "sur", "Reprendre la lecture"), el("div", "titre", l.titre));
+  const meta = el("div", "meta");
+  meta.append(el("span", "", `${Math.round(pourcent(l) * 100)} % lu`), el("span", "", `vitesse ${vitesseTexte(l.vitesse)}`));
+  if (l.audio_etat === "pret") meta.append(el("span", "badge-ia", `Voix IA : ${nomVoix(l.voix) || "prête"}`));
+  infos.append(meta, barre(pourcent(l)));
+  const play = el("div", "lecture-btn", "▶");
   play.setAttribute("aria-hidden", "true");
   a.append(couverture(l), infos, play);
   zone.replaceChildren(a);
 }
 
 function tuile(l) {
-  const a = document.createElement("a");
-  a.className = "livre";
-  a.href = `/lecteur.html?livre=${l.id}`;
+  const article = el("article", "livre");
+  const lien = el("a", "lien-livre");
+  lien.href = `/lecteur.html?livre=${l.id}`;
+  lien.setAttribute("aria-label", `Ouvrir ${l.titre}`);
   const c = couverture(l);
   c.append(barre(pourcent(l)));
-  const nom = document.createElement("div");
-  nom.className = "nom";
-  nom.textContent = l.titre;
-  nom.title = l.titre;
-  const etat = document.createElement("div");
-  etat.className = "etat";
+  if (l.audio_etat) {
+    const faits = l.total ? Math.floor((l.audio_faits / l.total) * 100) : 0;
+    const badge = el("span", "badge-audio" + (l.audio_etat === "pret" ? " pret" : ""),
+                     l.audio_etat === "pret" ? "Audio IA" : l.audio_etat === "erreur" ? "Audio : erreur" : `Audio ${faits} %`);
+    c.append(badge);
+  }
+  lien.append(c);
+
+  const infos = el("div", "infos-livre");
+  infos.append(el("div", "nom", l.titre));
   const p = pourcent(l);
-  etat.textContent = p >= 1 ? "Terminé" : l.lu_le ? `${Math.round(p * 100)} %` : "Nouveau";
-  const audio = document.createElement("button");
-  audio.className = "audio";
-  audio.hidden = !catalogue.actif && !l.audio_etat;
-  audio.textContent = texteAudio(l) ? [texteAudio(l), nomVoix(l.voix)].filter(Boolean).join(" · ") : "🎧 Créer le livre audio";
-  audio.onclick = e => { e.preventDefault(); ouvrirVoix(l); };
-  const suppr = document.createElement("button");
-  suppr.className = "suppr";
-  suppr.textContent = "✕";
-  suppr.setAttribute("aria-label", `Supprimer ${l.titre}`);
-  suppr.onclick = async e => {
-    e.preventDefault();
-    if (!confirm(`Supprimer « ${l.titre} » de ta bibliothèque ?`)) return;
-    await api(`/api/livres/${l.id}`, { method: "DELETE" });
-    charger();
-  };
-  const image = document.createElement("button");
-  image.className = "image-btn";
-  image.textContent = "🖼";
-  image.title = "Changer la couverture";
-  image.setAttribute("aria-label", `Changer la couverture de ${l.titre}`);
-  image.onclick = async e => {
-    e.preventDefault();
-    if (l.couverture && confirm("Revenir à la couverture générée ?\n(Annuler pour choisir une autre image.)")) {
-      await api(`/api/livres/${l.id}/couverture`, { method: "DELETE" });
-      return charger();
-    }
-    livreImage = l;
-    $("image").click();
-  };
-  a.append(suppr, image, c, nom, etat, audio);
-  return a;
+  infos.append(el("div", "etat", p >= 1 ? "Terminé" : l.lu_le ? `${Math.round(p * 100)} % lu` : "Pas encore commencé"));
+  const jours = joursRestants(l);
+  if (jours <= 7) infos.append(el("div", "expire", jours ? `Supprimé dans ${jours} j sans écoute` : "Supprimé aujourd'hui sans écoute"));
+
+  const menu = el("button", "menu-btn", "⋯");
+  menu.setAttribute("aria-label", `Actions pour ${l.titre}`);
+  menu.onclick = () => ouvrirMenu(l);
+  article.append(lien, menu, infos);
+  return article;
+}
+
+function ouvrirMenu(l) {
+  const actions = [];
+  if (catalogue.actif || l.audio_etat) {
+    actions.push({ texte: l.audio_etat ? "Livre audio" : "Créer le livre audio",
+                   aide: l.audio_etat ? `${texteAudio(l)}${nomVoix(l.voix) ? `, voix « ${nomVoix(l.voix)} »` : ""}` : "Une voix IA lit ton livre",
+                   faire: async () => ouvrirVoix(l) });
+  }
+  actions.push({ texte: "Changer la couverture", aide: "Image JPEG, PNG ou WebP, 5 Mo maximum",
+                 faire: async () => { livreImage = l; $("image").click(); } });
+  if (l.couverture) {
+    actions.push({ texte: "Revenir à la couverture générée",
+                   faire: async () => { await api(`/api/livres/${l.id}/couverture`, { method: "DELETE" }); toast("Couverture d'origine remise."); charger(); } });
+  }
+  actions.push({ texte: "Supprimer le livre", aide: "Le PDF, la couverture et le livre audio", danger: true,
+                 question: `Supprimer « ${l.titre} » de ta bibliothèque ?`,
+                 faire: async () => { await api(`/api/livres/${l.id}`, { method: "DELETE" }); toast("Livre supprimé."); charger(); } });
+  menuActions(l.titre, `${Math.round(pourcent(l) * 100)} % lu`, actions);
 }
 
 function tuileAjout() {
-  const div = document.createElement("div");
-  const b = document.createElement("button");
-  b.className = "ajout" + (enImport ? " charge" : "");
-  b.innerHTML = enImport ? `<b>…</b><span>Import en cours</span>` : `<b>+</b><span>Ajouter un PDF</span>`;
+  const b = el("button", "ajout" + (enImport ? " charge" : ""));
+  b.append(el("b", "", enImport ? "…" : "+"), el("span", "", enImport ? "Import en cours" : "Ajouter un PDF"));
   b.disabled = enImport > 0;
   b.onclick = () => $("fichier").click();
-  div.append(b);
-  return div;
+  return b;
 }
 
 async function importer(fichiers) {
   const pdfs = [...fichiers].filter(f => f.type === "application/pdf" || /\.pdf$/i.test(f.name));
-  if (!pdfs.length) return;
+  if (!pdfs.length) return toast("Seuls les fichiers PDF peuvent être ajoutés.", true);
   enImport = pdfs.length;
-  charger();
-  const erreurs = [], repris = [];
+  afficherGrille();
   for (const f of pdfs) {
     try {
       if (f.size > MAX) throw new Error("fichier trop gros (50 Mo maximum)");
       const r = await api("/api/livres", { method: "POST", headers: { "Content-Type": "application/pdf", "X-Nom": encodeURIComponent(f.name) }, body: f });
-      if (r.repris) repris.push(`${f.name} : ta position a été retrouvée`);
+      toast(r.repris ? `${f.name} ajouté : ta position a été retrouvée.` : `${f.name} ajouté.`);
     } catch (err) {
-      erreurs.push(`${f.name} : ${err.message}`);
+      toast(`${f.name} : ${err.message}`, true);
     }
     enImport--;
-    charger();
+    await charger();
   }
-  $("message").textContent = [...erreurs, ...repris].join(" · ");
-  $("message").className = "message" + (erreurs.length ? " erreur" : "");
 }
 
 $("fichier").onchange = e => { importer(e.target.files); e.target.value = ""; };
-
-// ---------- Choix de la voix du livre audio ----------
-let livreVoix = null;
-let demo = null;
-
-function ouvrirVoix(l) {
-  livreVoix = l;
-  $("choix-titre").textContent = `Livre audio : ${l.titre}`;
-  $("choix-message").textContent = l.audio_etat ? `${texteAudio(l)} · voix « ${nomVoix(l.voix) || "supprimée"} »` : "";
-  $("choix-message").className = "message";
-  $("choix-supprimer").hidden = !l.audio_etat;
-  $("choix-lancer").textContent = l.audio_etat ? "Changer de voix" : "Lancer";
-  $("choix-lancer").disabled = !catalogue.actif;
-  $("choix-liste").replaceChildren(...catalogue.voix.map(v => {
-    const ligne = document.createElement("label");
-    ligne.className = "choix";
-    const radio = document.createElement("input");
-    radio.type = "radio";
-    radio.name = "voix";
-    radio.value = v.id;
-    radio.checked = v.id === (l.voix || catalogue.voix[0].id);
-    const nom = document.createElement("span");
-    nom.textContent = v.nom;
-    const ecouter = document.createElement("button");
-    ecouter.type = "button";
-    ecouter.textContent = v.demo ? "▶ Démo" : "Démo bientôt";
-    ecouter.disabled = !v.demo;
-    ecouter.onclick = e => {
-      e.preventDefault();
-      if (demo) demo.pause();
-      demo = new Audio(`/api/voix/${v.id}/demo`);
-      demo.play();
-    };
-    ligne.append(radio, nom, ecouter);
-    return ligne;
-  }));
-  $("choix-voix").showModal();
-}
-
-$("choix-fermer").onclick = () => { if (demo) demo.pause(); $("choix-voix").close(); };
-$("choix-lancer").onclick = async () => {
-  const choisie = +document.querySelector('input[name="voix"]:checked')?.value;
-  if (!choisie) return;
-  if (livreVoix.audio_etat && choisie === livreVoix.voix && livreVoix.audio_etat !== "erreur") {
-    $("choix-message").textContent = "C'est déjà la voix de ce livre.";
-    return;
-  }
-  if (livreVoix.audio_etat && choisie !== livreVoix.voix &&
-      !confirm("Changer de voix refait tout le livre audio. Continuer ?")) return;
-  try {
-    await api(`/api/livres/${livreVoix.id}/audio`, envoi({ voix: choisie }));
-    $("choix-voix").close();
-    charger();
-  } catch (err) {
-    $("choix-message").textContent = err.message;
-    $("choix-message").className = "message erreur";
-  }
-};
-$("choix-supprimer").onclick = async () => {
-  if (!confirm("Supprimer le livre audio ? Le livre reste lisible avec la voix Google.")) return;
-  await api(`/api/livres/${livreVoix.id}/audio`, { method: "DELETE" });
-  $("choix-voix").close();
-  charger();
-};
 
 $("image").onchange = async e => {
   const f = e.target.files[0];
@@ -245,15 +202,85 @@ $("image").onchange = async e => {
   try {
     if (f.size > MAX_IMAGE) throw new Error("image trop grosse (5 Mo maximum)");
     await api(`/api/livres/${livreImage.id}/couverture`, { method: "POST", headers: { "Content-Type": f.type }, body: f });
-    $("message").textContent = "";
+    toast("Couverture changée.");
   } catch (err) {
-    $("message").textContent = `Couverture : ${err.message}`;
-    $("message").className = "message erreur";
+    toast(`Couverture : ${err.message}`, true);
   }
   charger();
 };
 
-// Glisser-déposer n'importe où sur la page
+// ---------- Choix de la voix du livre audio ----------
+let livreVoix = null;
+let demo = null;
+
+function arreterDemo() {
+  if (demo) demo.audio.pause();
+  if (demo) demo.bouton.textContent = "▶ Écouter";
+  demo = null;
+}
+
+function ouvrirVoix(l) {
+  livreVoix = l;
+  $("choix-titre").textContent = `Livre audio : ${l.titre}`;
+  $("choix-etat").textContent = l.audio_etat ? `${texteAudio(l)}, voix « ${nomVoix(l.voix) || "retirée du catalogue"} ».` : "";
+  $("choix-supprimer").hidden = !l.audio_etat;
+  $("choix-lancer").textContent = l.audio_etat ? "Changer de voix" : "Créer le livre audio";
+  $("choix-lancer").disabled = !catalogue.actif || !catalogue.voix.length;
+  const choisie = l.voix || (catalogue.voix[0] || {}).id;
+  $("choix-liste").replaceChildren(...catalogue.voix.map(v => {
+    const carte = el("label", "carte-voix");
+    const radio = el("input");
+    radio.type = "radio";
+    radio.name = "voix";
+    radio.value = v.id;
+    radio.checked = v.id === choisie;
+    const nom = el("span", "nom", v.nom);
+    const ecouter = el("button", "ecouter", v.demo ? "▶ Écouter" : "Démo bientôt");
+    ecouter.type = "button";
+    ecouter.disabled = !v.demo;
+    ecouter.onclick = e => {
+      e.preventDefault();
+      const memeVoix = demo && demo.bouton === ecouter;
+      arreterDemo();
+      if (memeVoix) return;
+      demo = { audio: new Audio(`/api/voix/${v.id}/demo`), bouton: ecouter };
+      demo.audio.onended = arreterDemo;
+      ecouter.textContent = "■ Arrêter";
+      demo.audio.play().catch(() => { toast("Impossible de lire la démo.", true); arreterDemo(); });
+      radio.checked = true;
+    };
+    carte.append(radio, nom, ecouter);
+    return carte;
+  }));
+  $("choix-voix").showModal();
+}
+
+$("choix-voix").addEventListener("close", arreterDemo);
+$("choix-fermer").onclick = () => $("choix-voix").close();
+$("choix-lancer").onclick = async () => {
+  const choisie = +document.querySelector('input[name="voix"]:checked')?.value;
+  if (!choisie) return toast("Choisis d'abord une voix.", true);
+  const l = livreVoix;
+  if (l.audio_etat && choisie === l.voix && l.audio_etat !== "erreur") return toast("C'est déjà la voix de ce livre.");
+  if (l.audio_etat && choisie !== l.voix && !confirm("Changer de voix refait tout le livre audio. Continuer ?")) return;
+  try {
+    await api(`/api/livres/${l.id}/audio`, envoi({ voix: choisie }));
+    $("choix-voix").close();
+    toast(`Livre audio lancé avec la voix « ${nomVoix(choisie)} ». Tu peux commencer à l'écouter.`);
+    charger();
+  } catch (err) {
+    toast(err.message, true);
+  }
+};
+$("choix-supprimer").onclick = async () => {
+  if (!confirm("Supprimer le livre audio ? Le livre reste lisible avec la voix Google.")) return;
+  await api(`/api/livres/${livreVoix.id}/audio`, { method: "DELETE" });
+  $("choix-voix").close();
+  toast("Livre audio supprimé.");
+  charger();
+};
+
+// ---------- Glisser-déposer n'importe où sur la page ----------
 let profondeur = 0;
 addEventListener("dragenter", e => { e.preventDefault(); profondeur++; document.body.classList.add("survol"); });
 addEventListener("dragleave", () => { if (--profondeur <= 0) { profondeur = 0; document.body.classList.remove("survol"); } });

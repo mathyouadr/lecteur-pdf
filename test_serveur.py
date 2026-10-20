@@ -6,6 +6,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from urllib.parse import parse_qs, urlsplit
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -27,6 +28,7 @@ assert phrases("etc. et ainsi de suite. Fin.") == ["etc. et ainsi de suite.", "F
 tmp = Path(tempfile.mkdtemp())
 base.DONNEES, base.BASE, base.LIVRES = tmp, tmp / "test.db", tmp / "livres"
 base.AUDIO, base.COUVERTURES, base.VOIX = tmp / "audio", tmp / "couvertures", tmp / "voix"
+serveur.COUVERTURES_EN_LIGNE = False       # pas d'Open Library pendant les tests (sauf avec le faux, plus bas)
 base.initialiser()
 httpd = ThreadingHTTPServer(("127.0.0.1", 0), serveur.Gestionnaire)
 threading.Thread(target=httpd.serve_forever, daemon=True).start()
@@ -138,6 +140,61 @@ assert appel(f"/api/livres/{lid}/couverture", cookie=admin)[0] == 200
 assert json.loads(appel("/api/livres", cookie=alice)[1])[0]["couverture"] == "png"
 assert appel(f"/api/livres/{lid}/couverture", cookie=alice, methode="DELETE")[0] == 200
 assert appel(f"/api/livres/{lid}/couverture", cookie=alice)[0] == 404 and not list(base.COUVERTURES.iterdir())
+
+# Couverture automatique : un PDF qui commence par une grande image la prend comme couverture
+illustre = pymupdf.open()
+page = illustre.new_page()
+pix = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 200, 300), False)
+pix.set_rect(pix.irect, (200, 40, 90))
+page.insert_image(page.rect, stream=pix.tobytes("png"))
+illustre.new_page().insert_text((72, 72), "Le texte commence ici. Deuxième phrase.")
+code, corps, _ = appel("/api/livres", cookie=alice, brut=illustre.tobytes(), entetes={"Content-Type": "application/pdf", "X-Nom": "Illustre.pdf"})
+lid_illustre = json.loads(corps)["id"]
+code, corps, h = appel(f"/api/livres/{lid_illustre}/couverture", cookie=alice)
+assert code == 200 and h["Content-Type"] == "image/jpeg" and corps[:3] == b"\xff\xd8\xff"
+assert base.livre(None, lid)["couverture"] is None                   # « Mon livre » commence par du texte
+assert appel(f"/api/livres/{lid_illustre}", cookie=alice, methode="DELETE")[0] == 200
+
+# Sinon, couverture cherchée sur Open Library (faux serveur), seulement si le titre correspond vraiment
+jpeg = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 20, 30), False).tobytes("jpg")
+DOCS = {"germinal": [{"title": "Germinal", "author_name": ["Émile Zola"], "cover_i": 42}],
+        "mon livre": [{"title": "Mon livre de coloriage pour les petits", "author_name": ["X"], "cover_i": 43},
+                      {"title": "Mon livre", "author_name": ["Y"]}]}
+
+
+class FauxOpenLibrary(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path.startswith("/search.json"):
+            q = parse_qs(urlsplit(self.path).query)["q"][0].lower()
+            corps, type_ = json.dumps({"docs": DOCS.get(q, [])}).encode(), "application/json"
+        else:
+            corps, type_ = jpeg, "image/jpeg"
+        self.send_response(200)
+        self.send_header("Content-Type", type_)
+        self.end_headers()
+        self.wfile.write(corps)
+
+    def log_message(self, *_):
+        pass
+
+
+ol = ThreadingHTTPServer(("127.0.0.1", 0), FauxOpenLibrary)
+threading.Thread(target=ol.serve_forever, daemon=True).start()
+serveur.OPENLIBRARY = serveur.OPENLIBRARY_COUVERTURES = f"http://127.0.0.1:{ol.server_port}"
+assert serveur.couverture_en_ligne("Germinal") == jpeg
+assert serveur.couverture_en_ligne("Mon livre") is None          # titre trop différent, ou pas de couverture
+assert serveur.couverture_en_ligne("Inconnu au bataillon") is None
+serveur.COUVERTURES_EN_LIGNE = True
+code, corps, _ = appel("/api/livres", cookie=alice, brut=doc.tobytes(), entetes={"Content-Type": "application/pdf", "X-Nom": "Germinal.pdf"})
+lid_g = json.loads(corps)["id"]
+for _ in range(50):                                               # cherchée en arrière-plan, après l'import
+    if base.fichier_couverture(None, lid_g):
+        break
+    time.sleep(0.1)
+assert base.fichier_couverture(None, lid_g).read_bytes() == jpeg
+serveur.COUVERTURES_EN_LIGNE = False
+ol.shutdown()
+assert appel(f"/api/livres/{lid_g}", cookie=alice, methode="DELETE")[0] == 200
 
 # Audio IA d'une phrase : 404 tant qu'il n'est pas généré (le lecteur passe alors sur la voix Google)
 assert appel(f"/api/livres/{lid}/audio/0", cookie=alice)[0] == 404
@@ -408,6 +465,42 @@ c.commit()
 c.close()
 base.purger()                                             # plus de 2 mois après la dernière écoute : oubliée
 assert importer("Vieux (4).pdf")["repris"] is False
+
+# Présentation des nouveautés : à voir une fois, puis plus jamais
+assert json.loads(appel("/api/moi", cookie=alice)[1])["voir_nouveautes"] == 1
+assert appel("/api/moi/nouveautes", {}, cookie=alice)[0] == 200
+assert json.loads(appel("/api/moi", cookie=alice)[1])["voir_nouveautes"] == 0
+assert appel("/api/moi/nouveautes", {})[0] == 401
+
+# Ruban du lecteur : carte des phrases déjà en stock en voix IA
+lid_r = importer("Ruban.pdf", long.tobytes())["id"]
+base.ecrire_audio(lid_r, 2, b"x", "wav")
+carte = json.loads(appel(f"/api/livres/{lid_r}/carte", cookie=alice)[1])
+assert carte == {"etat": None, "voix": None, "carte": "00100000"}, carte
+assert appel(f"/api/livres/{lid_r}/carte", cookie=admin)[0] == 200
+base.creer_utilisateur("carole", "motdepasse3", "valide")
+_, carole = connexion("carole", "motdepasse3")
+assert appel(f"/api/livres/{lid_r}/carte", cookie=carole)[0] == 404
+
+# L'admin remet une progression à zéro, oublie les positions gardées, vide une bibliothèque
+appel(f"/api/livres/{lid_r}/progression", {"phrase": 5, "total": 8, "vitesse": 1}, cookie=alice)
+assert appel(f"/api/admin/livres/{lid_r}/progression", {}, cookie=alice)[0] == 403
+assert appel(f"/api/admin/livres/{lid_r}/progression", {}, cookie=admin)[0] == 200
+assert json.loads(appel(f"/api/livres/{lid_r}", cookie=alice)[1])["phrase"] == 0
+assert appel("/api/admin/livres/99999/progression", {}, cookie=admin)[0] == 404
+appel(f"/api/livres/{lid_r}/progression", {"phrase": 3, "total": 8, "vitesse": 1}, cookie=alice)
+vieillir(lid_r, 31)
+base.purger()                                             # le livre part, sa position est gardée
+compte_alice = next(c for c in json.loads(appel("/api/admin/utilisateurs", cookie=admin)[1]) if c["identifiant"] == "alice")
+assert compte_alice["positions"] == 1 and compte_alice["connecte_le"] and "octets" in compte_alice
+assert appel(f"/api/admin/utilisateurs/{alice_id}/positions", cookie=alice, methode="DELETE")[0] == 403
+assert appel(f"/api/admin/utilisateurs/{alice_id}/positions", cookie=admin, methode="DELETE")[0] == 200
+assert importer("Ruban (réimport).pdf", long.tobytes())["repris"] is False
+assert json.loads(appel(f"/api/livres", cookie=alice)[1])
+assert appel(f"/api/admin/utilisateurs/{alice_id}/livres", cookie=alice, methode="DELETE")[0] == 403
+assert appel(f"/api/admin/utilisateurs/{alice_id}/livres", cookie=admin, methode="DELETE")[0] == 200
+assert json.loads(appel("/api/livres", cookie=alice)[1]) == [] and appel("/api/moi", cookie=alice)[0] == 200   # le compte reste
+assert not list((base.LIVRES / str(alice_id)).glob("*.pdf"))
 
 # Migration : un livre importé avant le découpage serveur est découpé au démarrage, sa progression recalée
 c = sqlite3.connect(base.BASE)

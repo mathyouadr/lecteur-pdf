@@ -38,6 +38,20 @@ def paragraphes(donnees: bytes, premiere: int = 1, derniere: int | None = None) 
     return [re.sub(r"\s+", " ", unicodedata.normalize("NFKC", p)) for p in sortie]  # NFKC : ligatures ﬁ ﬃ → fi ffi
 
 
+def couverture(donnees: bytes, pages: int = 3, part: float = .4) -> bytes | None:
+    """Couverture du PDF : la première des premières pages occupée en grande partie par une image,
+    rendue en JPEG. None si le livre commence par du texte (on garde alors la couverture générée)."""
+    doc = pymupdf.open(stream=donnees, filetype="pdf")
+    for page in doc.pages(0, min(pages, doc.page_count)):
+        surface = page.rect.width * page.rect.height
+        grande = any((i["bbox"][2] - i["bbox"][0]) * (i["bbox"][3] - i["bbox"][1]) >= part * surface
+                     for i in page.get_image_info())
+        if grande:
+            echelle = 600 / max(page.rect.width, 1)          # 600 px de large : net dans la grille, léger
+            return page.get_pixmap(matrix=pymupdf.Matrix(echelle, echelle)).tobytes("jpg", jpg_quality=82)
+    return None
+
+
 # Fin de phrase : ponctuation forte (et guillemet ou parenthèse fermants), puis espace, puis début de phrase
 FIN = re.compile(r"[.!?…]+(?:\s*[»”\"')\]])*\s+(?=[«“\"'(\[—–-]|\d|[A-ZÀ-ÖØ-ÞŒ])")  # « Bonjour ! » : espace avant »
 ABREVIATIONS = {"m", "mm", "mme", "mmes", "mlle", "mlles", "dr", "pr", "me", "st", "ste", "cf", "p", "etc", "vol", "chap", "no", "n°"}

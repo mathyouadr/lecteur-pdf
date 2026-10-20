@@ -12,30 +12,49 @@
   <div class="barre">
     <a class="lien" href="/bibliotheque.html" aria-label="Retour à la bibliothèque">←</a>
     <div class="titre-livre" id="titre">…</div>
-    <button id="lire" class="principal" disabled>▶ Lire</button>
+    <span class="voix-actuelle" id="voix" title="Voix de la phrase en cours" hidden></span>
+  </div>
+</header>
+<main class="page">
+  <p class="bandeau" id="etat" role="status"></p>
+  <div id="texte"></div>
+</main>
+
+<div class="lecture" role="region" aria-label="Lecture">
+  <div class="ruban" id="ruban" title="Cliquer pour aller à ce passage">
+    <canvas id="ruban-dessin" aria-hidden="true"></canvas>
+    <i class="repere" id="repere"></i>
+  </div>
+  <div class="commandes">
+    <div class="temps" id="temps"></div>
+    <div class="boutons">
+      <button id="precedente" aria-label="Phrase précédente" title="Phrase précédente (←)">⏮</button>
+      <button id="lire" class="principal" disabled aria-label="Lire" title="Lire ou mettre en pause (Espace)">▶</button>
+      <button id="suivante" aria-label="Phrase suivante" title="Phrase suivante (→)">⏭</button>
+    </div>
     <select id="vitesse" aria-label="Vitesse de lecture">
       <option value="0.8">0,8×</option><option value="1" selected>1×</option><option value="1.25">1,25×</option>
       <option value="1.5">1,5×</option><option value="1.75">1,75×</option><option value="2">2×</option>
       <option value="2.5">2,5×</option><option value="3">3×</option><option value="4">4×</option><option value="5">5×</option>
     </select>
-    <span class="discret" id="voix" title="Voix de la phrase en cours"></span>
   </div>
-  <div class="avance"><i id="avance"></i></div>
-</header>
-<main class="page">
-  <div class="message" id="etat" role="status"></div>
-  <div id="texte"></div>
-</main>
+</div>
+
 <script src="/commun.js"></script>
 <script>
 const idLivre = +new URLSearchParams(location.search).get("livre");
+const CARACTERES_PAR_SECONDE = 15;   // débit moyen d'une voix à 1×, pour estimer le temps restant
 let phrases = [];          // <span> de chaque phrase
 let courant = 0;           // index de la phrase lue
 let enLecture = false;
 let audio = null;
-let cache = new Map();     // index -> Promise<URL audio>
+let cache = new Map();     // index -> Promise<{url, ia}>
 let generation = 0;        // invalide les lectures en cours quand on saute ou change de réglage
 let lectureSeule = false;  // l'admin écoute le livre de quelqu'un : on ne touche pas à sa progression
+let carte = "";            // une lettre par phrase : "1" = audio IA en stock
+let suiviCarte = null;
+
+api("/api/moi").then(m => { if (m.voir_nouveautes) presenterNouveautes(); });
 
 // ---------- Chargement du livre ----------
 api(`/api/livres/${idLivre}`).then(livre => {
@@ -48,9 +67,10 @@ api(`/api/livres/${idLivre}`).then(livre => {
   marquer();
   $("etat").textContent = lectureSeule
     ? `Livre de ${livre.proprietaire}, ouvert en lecture seule : sa progression et ses stats ne changent pas.`
-    : livre.phrase ? "Reprise là où tu t'étais arrêté. Clique une phrase pour lire à partir de là."
-                   : "Clique une phrase pour lire à partir de là, ou appuie sur Espace.";
-}).catch(err => { $("etat").textContent = err.message; $("etat").className = "message erreur"; });
+    : livre.phrase ? "Reprise là où tu t'étais arrêté. Touche une phrase pour lire à partir de là."
+                   : "Touche une phrase pour lire à partir de là, ou appuie sur Espace.";
+  suivreCarte();
+}).catch(err => { $("etat").textContent = err.message; $("etat").classList.add("erreur"); });
 
 // Les phrases sont découpées par le serveur : le numéro de phrase est le même pour la voix Google,
 // pour les fichiers du livre audio IA et pour la progression enregistrée.
@@ -59,8 +79,7 @@ function afficher(paragraphes) {
   for (const para of paragraphes) {
     const p = document.createElement("p");
     for (const phrase of para) {
-      const s = document.createElement("span");
-      s.textContent = phrase + " ";
+      const s = el("span", "", phrase + " ");
       const i = phrases.length;
       s.onclick = () => lireDepuis(i);
       phrases.push(s);
@@ -71,6 +90,55 @@ function afficher(paragraphes) {
   $("lire").disabled = false;
 }
 
+// ---------- Ruban : où est-on, et quels passages sont déjà prêts en voix IA ----------
+async function suivreCarte() {
+  clearTimeout(suiviCarte);
+  try {
+    const c = await api(`/api/livres/${idLivre}/carte`);
+    carte = c.carte;
+    if (["attente", "encours"].includes(c.etat)) suiviCarte = setTimeout(suivreCarte, 15000);
+  } catch { carte = ""; }
+  dessinerRuban();
+}
+
+function dessinerRuban() {
+  const toile = $("ruban-dessin");
+  const largeur = toile.clientWidth;
+  if (!largeur || !phrases.length) return;
+  toile.width = largeur * devicePixelRatio;
+  toile.height = 8 * devicePixelRatio;
+  const ctx = toile.getContext("2d");
+  const pas = toile.width / phrases.length;
+  ctx.fillStyle = "rgba(255, 255, 255, .13)";
+  ctx.fillRect(0, 0, toile.width, toile.height);
+  ctx.fillStyle = "#f08a4b";
+  for (let i = 0; i < carte.length; i++) {
+    if (carte[i] !== "1") continue;
+    let j = i;
+    while (j + 1 < carte.length && carte[j + 1] === "1") j++;       // regroupe les passages prêts
+    ctx.fillRect(i * pas, 0, Math.max((j - i + 1) * pas, 1), toile.height);
+    i = j;
+  }
+  $("repere").style.left = `${(courant / Math.max(phrases.length - 1, 1)) * 100}%`;
+}
+addEventListener("resize", dessinerRuban);
+
+$("ruban").onclick = e => {
+  const r = $("ruban").getBoundingClientRect();
+  const i = Math.round(((e.clientX - r.left) / r.width) * (phrases.length - 1));
+  if (enLecture) lireDepuis(i); else placer(i);
+};
+
+function tempsRestant() {
+  let car = 0;
+  for (let i = courant; i < phrases.length; i++) car += phrases[i].textContent.length;
+  const minutes = Math.round(car / CARACTERES_PAR_SECONDE / +$("vitesse").value / 60);
+  const fait = `${Math.round((courant / Math.max(phrases.length, 1)) * 100)} %`;
+  if (!phrases.length) return "";
+  return minutes >= 60 ? `${fait}, encore ${Math.floor(minutes / 60)} h ${String(minutes % 60).padStart(2, "0")}`
+                       : `${fait}, encore ${minutes} min`;
+}
+
 // ---------- Progression ----------
 function marquer() {
   phrases.forEach(s => s.classList.remove("lue"));
@@ -78,7 +146,8 @@ function marquer() {
     phrases[courant].classList.add("lue");
     phrases[courant].scrollIntoView({ block: "center", behavior: "smooth" });
   }
-  $("avance").style.width = `${phrases.length ? (courant / phrases.length) * 100 : 0}%`;
+  $("temps").textContent = tempsRestant();
+  dessinerRuban();
 }
 
 // ---------- Temps d'écoute (pour les stats) ----------
@@ -111,17 +180,27 @@ function sauver() {
 addEventListener("pagehide", sauver);
 
 // ---------- Synthèse et lecture ----------
-// Audio de la phrase i : le fichier du livre audio IA s'il est déjà généré, sinon la voix Google à la volée
+// Audio de la phrase i : le livre audio IA (en stock, ou généré à la demande), sinon la voix Google
 function son(i) {
   if (!cache.has(i)) {
     cache.set(i, (async () => {
       const r = await fetch(`/api/livres/${idLivre}/audio/${i}`);
-      if (r.ok) return { url: URL.createObjectURL(await r.blob()), ia: true };
+      if (r.ok) {
+        if (carte[i] === "0") carte = carte.slice(0, i) + "1" + carte.slice(i + 1);
+        return { url: URL.createObjectURL(await r.blob()), ia: true };
+      }
       const b = await api("/api/tts", envoi({ texte: phrases[i].textContent }));
       return { url: URL.createObjectURL(b), ia: false };
     })());
   }
   return cache.get(i);
+}
+
+function montrerVoix(ia) {
+  $("voix").hidden = false;
+  $("voix").textContent = ia ? "Voix IA" : "Voix Google";
+  $("voix").classList.toggle("ia", ia);
+  $("voix").title = ia ? "Phrase lue par le livre audio IA" : "Phrase pas encore prête en voix IA : lue par Google";
 }
 
 async function boucle(gen) {
@@ -132,9 +211,9 @@ async function boucle(gen) {
     for (let k = 1; k <= 2 && courant + k < phrases.length; k++) son(courant + k).catch(() => {}); // précharge la suite
     let url, ia;
     try { ({ url, ia } = await actuelle); }
-    catch (err) { cache.delete(courant); $("etat").textContent = err.message; return pause(); }
+    catch (err) { cache.delete(courant); toast(err.message, true); return pause(); }
     if (gen !== generation) return;
-    $("voix").textContent = ia ? "Voix IA" : "Voix Google";
+    montrerVoix(ia);
     audio = new Audio(url);
     audio.playbackRate = +$("vitesse").value;   // le navigateur garde la hauteur de la voix
     suivre(audio);
@@ -148,34 +227,51 @@ async function boucle(gen) {
   if (courant >= phrases.length) {
     pause();
     sauver();               // phrase = total : livre terminé
-    $("avance").style.width = "100%";
     courant = 0;
-    $("etat").textContent = "Lecture terminée.";
+    toast("Lecture terminée.");
   }
+}
+
+function boutonLire(enCours) {
+  $("lire").textContent = enCours ? "❚❚" : "▶";
+  $("lire").setAttribute("aria-label", enCours ? "Pause" : "Lire");
 }
 
 function lireDepuis(i) {
   generation++;
   if (audio) audio.pause();
-  courant = i;
+  courant = Math.min(Math.max(i, 0), phrases.length - 1);
   enLecture = true;
-  $("etat").textContent = "";
-  $("lire").textContent = "❚❚ Pause";
+  boutonLire(true);
   boucle(generation);
 }
 
 function pause() {
   enLecture = false;
   if (audio) audio.pause();
-  $("lire").textContent = "▶ Lire";
+  boutonLire(false);
   sauver();
+}
+
+// À l'arrêt : déplace la position sans lire (l'éventuelle phrase en pause est abandonnée)
+function placer(i) {
+  generation++;
+  if (audio) { audio.pause(); audio = null; }
+  courant = Math.min(Math.max(i, 0), phrases.length - 1);
+  marquer();
+  sauver();
+}
+
+function sauter(delta) {
+  const i = Math.min(Math.max(courant + delta, 0), phrases.length - 1);
+  if (enLecture) lireDepuis(i); else placer(i);
 }
 
 $("lire").onclick = () => {
   if (enLecture) return pause();
   if (audio && !audio.ended && audio.currentTime > 0) {    // reprise au milieu d'une phrase
     enLecture = true;
-    $("lire").textContent = "❚❚ Pause";
+    boutonLire(true);
     const gen = generation;
     audio.play();
     audio.onended = () => { phrasesLues++; if (gen === generation && enLecture) { cache.delete(courant); courant++; boucle(gen); } };
@@ -183,17 +279,20 @@ $("lire").onclick = () => {
   }
   lireDepuis(courant);
 };
+$("precedente").onclick = () => sauter(-1);
+$("suivante").onclick = () => sauter(1);
 
 $("vitesse").onchange = () => {
   if (audio) audio.playbackRate = +$("vitesse").value;
+  $("temps").textContent = tempsRestant();
   sauver();
 };
 
 document.addEventListener("keydown", e => {
-  if (e.code === "Space" && phrases.length && !["SELECT", "BUTTON"].includes(e.target.tagName)) {
-    e.preventDefault();
-    $("lire").click();
-  }
+  if (!phrases.length || ["SELECT", "INPUT"].includes(e.target.tagName) || document.querySelector("dialog[open]")) return;
+  if (e.code === "Space" && e.target.tagName !== "BUTTON") { e.preventDefault(); $("lire").click(); }
+  if (e.code === "ArrowLeft") { e.preventDefault(); sauter(-1); }
+  if (e.code === "ArrowRight") { e.preventDefault(); sauter(1); }
 });
 </script>
 </body>

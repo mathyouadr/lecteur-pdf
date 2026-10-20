@@ -57,7 +57,8 @@ function texteAudio(l) {
            pret: "Livre audio prêt", erreur: "Livre audio : erreur" }[l.audio_etat] || "";
 }
 
-const octetsTexte = o => o > 1e9 ? `${(o / 1e9).toFixed(1).replace(".", ",")} Go` : `${Math.round(o / 1e6)} Mo`;
+const octetsTexte = o => !o ? "vide" : o < 1e6 ? `${Math.max(1, Math.round(o / 1e3))} Ko`
+  : o > 1e9 ? `${(o / 1e9).toFixed(1).replace(".", ",")} Go` : `${Math.round(o / 1e6)} Mo`;
 
 function barre(fraction) {
   const p = document.createElement("div");
@@ -75,4 +76,104 @@ const vitesseTexte = v => `${String(+v).replace(".", ",")}×`;
 async function deconnexion() {
   await fetch("/api/deconnexion", { method: "POST" });
   location.href = "/connexion.html";
+}
+
+function el(balise, classe, texte) {
+  const e = document.createElement(balise);
+  if (classe) e.className = classe;
+  if (texte !== undefined) e.textContent = texte;
+  return e;
+}
+
+const joursRestants = l => Math.max(0, Math.ceil(((l.lu_le || l.ajoute_le) + 30 * 86400 - Date.now() / 1000) / 86400));
+
+// ---------- Notifications brèves ----------
+function toast(texte, erreur = false) {
+  let zone = $("toasts");
+  if (!zone) {
+    zone = el("div");
+    zone.id = "toasts";
+    zone.setAttribute("role", "status");
+    zone.setAttribute("aria-live", "polite");
+    document.body.append(zone);
+  }
+  const t = el("div", "toast" + (erreur ? " erreur" : ""), texte);
+  zone.append(t);
+  setTimeout(() => t.remove(), erreur ? 7000 : 3500);
+}
+
+// ---------- Menu d'actions (même fenêtre sur ordinateur et au doigt) ----------
+// actions : [{ texte, aide?, danger?, question?, faire: async () => {} }]
+function menuActions(titre, sousTitre, actions) {
+  let d = $("menu-actions");
+  if (!d) {
+    d = el("dialog", "menu-actions");
+    d.id = "menu-actions";
+    d.addEventListener("click", e => { if (e.target === d) d.close(); });   // clic à côté : fermer
+    document.body.append(d);
+  }
+  const liste = el("div", "actions");
+  for (const a of actions) {
+    const b = el("button", "action" + (a.danger ? " danger" : ""));
+    b.append(el("span", "", a.texte));
+    if (a.aide) b.append(el("small", "", a.aide));
+    b.onclick = async () => {
+      if (a.question && !confirm(a.question)) return;
+      d.close();
+      try { await a.faire(); } catch (err) { toast(err.message, true); }
+    };
+    liste.append(b);
+  }
+  const fermer = el("button", "fermer", "Fermer");
+  fermer.onclick = () => d.close();
+  d.replaceChildren(el("h2", "", titre), ...(sousTitre ? [el("p", "discret", sousTitre)] : []), liste, fermer);
+  d.showModal();
+}
+
+// ---------- Présentation des nouveautés, une fois par compte ----------
+const NOUVEAUTES = [
+  { titre: "Tes livres lus par une voix IA",
+    texte: "Ouvre le menu d'un livre et choisis « Livre audio ». Écoute les démos, choisis ta voix : le livre est préparé sur notre serveur, et tu peux l'écouter pendant qu'il se prépare.",
+    visuel: () => { const v = el("div", "visuel-onde"); for (let i = 0; i < 24; i++) v.append(el("i")); return v; } },
+  { titre: "Ta propre couverture",
+    texte: "Dans le menu d'un livre, « Changer la couverture » remplace la couverture générée par l'image de ton choix (JPEG, PNG ou WebP).",
+    visuel: () => {
+      const v = el("div", "visuel-couvertures");
+      for (const titre of ["Germinal", "Notre-Dame de Paris", "Les Misérables"]) v.append(couverture({ titre }));
+      return v;
+    } },
+  { titre: "Une bibliothèque qui reste légère",
+    texte: "Un livre est supprimé 1 mois après ta dernière écoute. Ta position est gardée 2 mois : réimporte le même PDF et tu reprends à la bonne phrase.",
+    visuel: () => {
+      const v = el("div", "visuel-frise");
+      v.append(el("span", "repere debut", "Dernière écoute"), el("span", "repere mois", "1 mois : le livre est supprimé"),
+               el("span", "repere deux", "2 mois : la position est oubliée"));
+      return v;
+    } },
+];
+
+function presenterNouveautes() {
+  const d = el("dialog", "nouveautes");
+  d.setAttribute("aria-labelledby", "nouveautes-titre");
+  let etape = 0;
+  const afficher = () => {
+    const n = NOUVEAUTES[etape];
+    const points = el("div", "points");
+    NOUVEAUTES.forEach((_, i) => points.append(el("i", i === etape ? "actif" : "")));
+    const titre = el("h2", "", n.titre);
+    titre.id = "nouveautes-titre";
+    const suivant = el("button", "principal", etape < NOUVEAUTES.length - 1 ? "Suivant" : "C'est parti");
+    suivant.onclick = () => { if (etape < NOUVEAUTES.length - 1) { etape++; afficher(); } else d.close(); };
+    const passer = el("button", "lien", "Passer");
+    passer.onclick = () => d.close();
+    passer.hidden = etape === NOUVEAUTES.length - 1;
+    const pied = el("div", "pied");
+    pied.append(points, passer, suivant);
+    d.replaceChildren(el("p", "sur", "Nouveau dans le lecteur"), n.visuel(), titre, el("p", "", n.texte), pied);
+    suivant.focus();
+  };
+  d.addEventListener("close", () => { fetch("/api/moi/nouveautes", { method: "POST" }); d.remove(); });
+  document.body.append(d);
+  afficher();
+  d.showModal();
 }

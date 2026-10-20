@@ -11,16 +11,18 @@ import os
 import re
 import threading
 import time
+import unicodedata
+import urllib.request
 from http.cookies import SimpleCookie
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, unquote, urlsplit
+from urllib.parse import parse_qs, unquote, urlencode, urlsplit
 
 from gtts import gTTS
 
 import base
 import travaux
-from extraction import paragraphes
+from extraction import couverture as couverture_du_pdf, paragraphes
 
 PUBLIC = Path(__file__).parent / "public"
 PORT = 8765
@@ -31,6 +33,11 @@ MAX_JSON = 16 * 1024
 IMAGES = {b"\xff\xd8\xff": ("jpg", "image/jpeg"), b"\x89PNG\r\n\x1a\n": ("png", "image/png")}
 TYPES = {"jpg": "image/jpeg", "png": "image/png", "webp": "image/webp", "mp3": "audio/mpeg", "wav": "audio/wav"}
 ACTIONS_AUDIO = ("generer", "pause", "relancer", "supprimer")
+# Couverture cherchée en ligne (Open Library, sans clé) quand le PDF n'a pas d'image de couverture.
+# Seul le titre du livre est envoyé. COUVERTURES_EN_LIGNE=0 pour ne jamais rien chercher.
+COUVERTURES_EN_LIGNE = os.environ.get("COUVERTURES_EN_LIGNE", "1") == "1"
+OPENLIBRARY = "https://openlibrary.org"
+OPENLIBRARY_COUVERTURES = "https://covers.openlibrary.org"
 SECURE = "; Secure" if os.environ.get("LECTEUR_HTTPS") == "1" else ""
 IDENTIFIANT = re.compile(r"[\w.-]{3,32}")
 
@@ -49,6 +56,43 @@ def trop_d_echecs(identifiant):
 def noter_echec(identifiant):
     with verrou:
         echecs.setdefault(identifiant.lower(), []).append(time.time())
+
+
+def _mots(texte):
+    """Mots significatifs, sans accents ni majuscules (« Le Comte de Monte-Cristo » -> comte, monte, cristo)."""
+    texte = unicodedata.normalize("NFKD", texte.lower()).encode("ascii", "ignore").decode()
+    return {m for m in re.findall(r"[a-z0-9]+", texte) if len(m) > 2 or m.isdigit()}
+
+
+def couverture_en_ligne(titre):
+    """Image JPEG de la couverture trouvée sur Open Library, ou None si rien ne correspond vraiment :
+    tous les mots du titre doivent se retrouver dans le titre ou l'auteur trouvés, et le titre trouvé
+    ne doit pas en ajouter plus de 2 (évite « Mon livre » -> « Mon livre de coloriage »)."""
+    cherches = _mots(titre)
+    if not cherches:
+        return None
+    entetes = {"User-Agent": "lecteur-pdf (auto-hébergé)"}
+    url = f"{OPENLIBRARY}/search.json?" + urlencode({"q": titre, "limit": 5, "fields": "title,author_name,cover_i"})
+    with urllib.request.urlopen(urllib.request.Request(url, headers=entetes), timeout=10) as r:
+        resultats = json.loads(r.read()).get("docs", [])
+    for doc in resultats:
+        mots_titre = _mots(doc.get("title", ""))
+        mots_auteur = _mots(" ".join(doc.get("author_name", [])))
+        if doc.get("cover_i") and cherches <= mots_titre | mots_auteur and len(mots_titre - cherches) <= 2:
+            url = f"{OPENLIBRARY_COUVERTURES}/b/id/{int(doc['cover_i'])}-L.jpg?default=false"
+            with urllib.request.urlopen(urllib.request.Request(url, headers=entetes), timeout=10) as r:
+                image = r.read(MAX_IMAGE + 1)
+            return image if image.startswith(b"\xff\xd8\xff") and len(image) <= MAX_IMAGE else None
+    return None
+
+
+def poser_couverture_en_ligne(uid, lid, titre):
+    try:
+        image = couverture_en_ligne(titre)
+    except (OSError, ValueError):  # Open Library injoignable : on garde la couverture générée
+        return
+    if image and not base.fichier_couverture(None, lid):   # la personne n'en a pas mis une entre-temps
+        base.definir_couverture(uid, lid, image, "jpg")
 
 
 def synthese(texte):
@@ -152,6 +196,7 @@ class Gestionnaire(SimpleHTTPRequestHandler):
             (r"/api/livres", lambda: self.repondre(base.livres(self.compte()["id"]))),
             (r"/api/livres/(\d+)", self.lire_livre),
             (r"/api/livres/(\d+)/audio/(\d+)", self.audio_phrase),
+            (r"/api/livres/(\d+)/carte", self.carte_audio),
             (r"/api/livres/(\d+)/couverture", lambda lid: self.fichier(base.fichier_couverture(self.cible(), int(lid)))),
             (r"/api/admin/utilisateurs", lambda: self.repondre(base.utilisateurs() if self.admin() else [])),
             (r"/api/admin/livres", lambda: self.repondre(base.tous_les_livres() if self.admin() else [])),
@@ -168,12 +213,14 @@ class Gestionnaire(SimpleHTTPRequestHandler):
             (r"/api/inscription", self.inscription),
             (r"/api/connexion", self.connexion),
             (r"/api/deconnexion", self.deconnexion),
+            (r"/api/moi/nouveautes", lambda: (base.nouveautes_vues(self.compte()["id"]), self.repondre({"ok": True}))),
             (r"/api/livres", self.importer),
             (r"/api/livres/(\d+)/progression", self.progression),
             (r"/api/livres/(\d+)/couverture", self.couverture),
             (r"/api/livres/(\d+)/audio", self.livre_audio),
             (r"/api/admin/statut", self.statut),
             (r"/api/admin/livres/(\d+)/audio", self.admin_audio),
+            (r"/api/admin/livres/(\d+)/progression", self.admin_reinitialiser),
             (r"/api/admin/srv02", self.admin_srv02),
             (r"/api/admin/voix", self.admin_ajouter_voix),
             (r"/api/admin/voix/essai", self.admin_essai),
@@ -186,6 +233,8 @@ class Gestionnaire(SimpleHTTPRequestHandler):
             (r"/api/livres/(\d+)/couverture", self.retirer_couverture),
             (r"/api/livres/(\d+)/audio", lambda lid: self.repondre({"ok": base.annuler_audio(self.cible(), int(lid))})),
             (r"/api/admin/utilisateurs/(\d+)", self.supprimer_utilisateur),
+            (r"/api/admin/utilisateurs/(\d+)/livres", self.admin_vider_bibliotheque),
+            (r"/api/admin/utilisateurs/(\d+)/positions", self.admin_oublier_positions),
             (r"/api/admin/voix/(\d+)", self.admin_supprimer_voix),
         ])
 
@@ -239,6 +288,23 @@ class Gestionnaire(SimpleHTTPRequestHandler):
         base.definir_statut(d["id"], d["statut"])
         self.repondre({"ok": True})
 
+    def admin_vider_bibliotheque(self, uid):
+        self.admin()
+        base.supprimer_livres_de(int(uid))
+        self.repondre({"ok": True})
+
+    def admin_oublier_positions(self, uid):
+        self.admin()
+        base.supprimer_positions_gardees(int(uid))
+        self.repondre({"ok": True})
+
+    def admin_reinitialiser(self, lid):
+        self.admin()
+        if not base.livre_visible(None, int(lid)):
+            raise Erreur(404, "Livre introuvable.")
+        base.reinitialiser_progression(int(lid))
+        self.repondre({"ok": True})
+
     def supprimer_utilisateur(self, uid):
         self.admin()
         if not base.supprimer_utilisateur(int(uid)):
@@ -267,6 +333,14 @@ class Gestionnaire(SimpleHTTPRequestHandler):
         titre = unquote(self.headers.get("X-Nom", "")).strip()
         titre = re.sub(r"\.pdf$", "", titre, flags=re.I)[:200] or "Sans titre"
         lid, repris = base.ajouter_livre(uid, titre, paras, pdf)
+        try:
+            image = couverture_du_pdf(pdf)
+        except Exception:  # une couverture illisible n'empêche pas l'import
+            image = None
+        if image:
+            base.definir_couverture(uid, lid, image, "jpg")
+        elif COUVERTURES_EN_LIGNE:
+            threading.Thread(target=poser_couverture_en_ligne, args=(uid, lid, titre), daemon=True).start()
         self.repondre({"id": lid, "repris": repris}, code=201)
 
     def couverture(self, lid):
@@ -322,6 +396,15 @@ class Gestionnaire(SimpleHTTPRequestHandler):
             self.repondre(synthese(texte), "audio/mpeg")
         except Exception:  # Google injoignable ou limite atteinte
             raise Erreur(502, "La voix Google ne répond pas.")
+
+    def carte_audio(self, lid):
+        """État du livre audio et carte des phrases déjà en stock, pour le ruban du lecteur."""
+        lid = int(lid)
+        if not base.livre_visible(self.cible(), lid):
+            raise Erreur(404, "Introuvable.")
+        info = base.info_audio(lid)
+        total = len(base.phrases_a_plat(lid))
+        self.repondre({"etat": info["audio_etat"], "voix": info["voix"], "carte": base.carte_audio(lid, total)})
 
     def audio_phrase(self, lid, n):
         """Audio IA d'une phrase : en stock, sinon généré tout de suite et mis en stock. 404 si l'IA n'est pas
