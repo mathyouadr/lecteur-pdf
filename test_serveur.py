@@ -274,6 +274,21 @@ assert travaux._tour() is True
 travaux.synthese_ia = original
 assert ordre == ["Un.", "Six.", "Sept.", "Huit.", "Deux.", "Trois.", "Cinq."], ordre   # « Quatre. » était en stock
 assert base.etat_audio(lid_long) == "pret" and base.phrases_generees(lid_long) == set(range(8))
+
+# Pendant qu'un auditeur génère à la demande, la file lui laisse la GPU, puis reprend seule
+assert appel(f"/api/livres/{lid_long}/audio", cookie=bob, methode="DELETE")[0] == 200
+assert appel(f"/api/livres/{lid_long}/audio", {"voix": v1}, cookie=bob)[0] == 200
+travaux.PRIORITE_ECOUTE = 1
+avant = len(recu)
+assert appel(f"/api/livres/{lid_long}/audio/7", cookie=bob)[0] == 200 and len(recu) == avant + 1
+file = threading.Thread(target=travaux._tour)
+file.start()
+time.sleep(0.6)
+assert len(recu) == avant + 1, "la file a pris la GPU pendant l'écoute"
+assert "écoute" in json.loads(appel("/api/admin/srv02", cookie=admin)[1])["message"]
+file.join(timeout=10)
+assert base.etat_audio(lid_long) == "pret" and len(recu) == avant + 8           # reprise après le délai
+travaux.PRIORITE_ECOUTE = 8
 faux.shutdown()
 
 # srv-02 éteint : pas d'audio IA à la demande, réponse rapide pour que le lecteur passe vite sur Google

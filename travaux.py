@@ -42,8 +42,10 @@ ESSAIS_PAR_PHRASE = 3
 
 # reveil_auto : c'est la file qui a réveillé srv-02 (donc elle l'éteindra) ; manuel : allumé depuis le panel ;
 # eteint_manuel : éteint depuis le panel, la file ne le rallume pas avant le prochain import ou un réveil manuel
+# ecoute_vue : dernière génération à la demande pour quelqu'un qui écoute ; la file lui laisse la GPU
 etat = {"message": "", "reveil_auto": False, "manuel": False, "eteint_manuel": False,
-        "inactif_depuis": None, "reveil_envoye": 0.0, "vs_ok": False, "vs_vu": 0.0}
+        "inactif_depuis": None, "reveil_envoye": 0.0, "vs_ok": False, "vs_vu": 0.0, "ecoute_vue": 0.0}
+PRIORITE_ECOUTE = 8   # secondes sans demande de l'auditeur avant que la file reprenne la GPU
 verrou = threading.Lock()
 en_generation = set()          # (livre, phrase) en cours de génération, par la file ou à la demande du lecteur
 verrou_phrases = threading.Lock()
@@ -172,10 +174,22 @@ def phrase_a_la_demande(lid, n):
     phrases = base.phrases_a_plat(lid)
     if not v or not 0 <= n < len(phrases) or not voicestudio_pret(recent=10):
         return None
+    etat["ecoute_vue"] = time.time()            # la file se met en retrait le temps de servir l'auditeur
     try:
         return generer_phrase(lid, n, phrases[n], v, delai=30)
     except (OSError, subprocess.CalledProcessError, ValueError):
         return None
+    finally:
+        etat["ecoute_vue"] = time.time()
+
+
+def _ceder_a_l_ecoute(lid):
+    """Pendant qu'un auditeur a besoin de la GPU (génération à la demande récente), la file attend."""
+    while time.time() - etat["ecoute_vue"] < PRIORITE_ECOUTE and base.etat_audio(lid) == "encours":
+        etat["message"] = "Quelqu'un écoute : la file laisse la priorité à la lecture."
+        time.sleep(0.5)
+    if etat["message"].startswith("Quelqu'un écoute"):
+        etat["message"] = ""
 
 
 # ---------- File de génération ----------
@@ -219,6 +233,7 @@ def _generer(lid, v):
             faites[n] = True
     compte = 0
     while True:
+        _ceder_a_l_ecoute(lid)
         if base.etat_audio(lid) != "encours":       # mis en pause, annulé ou livre supprimé pendant ce temps
             return base.etat_audio(lid)
         n = _suivante(faites, base.position(lid))
