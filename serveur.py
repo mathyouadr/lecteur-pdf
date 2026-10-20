@@ -231,6 +231,7 @@ class Gestionnaire(SimpleHTTPRequestHandler):
             (r"/api/livres/(\d+)/couverture", self.couverture),
             (r"/api/livres/(\d+)/audio", self.livre_audio),
             (r"/api/admin/statut", self.statut),
+            (r"/api/admin/utilisateurs/(\d+)/mdp", self.admin_reinitialiser_mdp),
             (r"/api/admin/livres/(\d+)/audio", self.admin_audio),
             (r"/api/admin/livres/(\d+)/progression", self.admin_reinitialiser),
             (r"/api/admin/srv02", self.admin_srv02),
@@ -252,8 +253,8 @@ class Gestionnaire(SimpleHTTPRequestHandler):
         ])
 
     # ---------- Comptes ----------
-    def identifiants(self):
-        d = self.json_recu()
+    def identifiants(self, d=None):
+        d = self.json_recu() if d is None else d
         identifiant, mdp = str(d.get("identifiant", "")).strip(), str(d.get("mdp", ""))
         if not IDENTIFIANT.fullmatch(identifiant):
             raise Erreur(400, "Identifiant : 3 à 32 caractères (lettres, chiffres, . - _).")
@@ -268,13 +269,22 @@ class Gestionnaire(SimpleHTTPRequestHandler):
         self.repondre({"ok": True}, code=201)
 
     def connexion(self):
-        identifiant, mdp = self.identifiants()
-        if trop_d_echecs(identifiant):
-            raise Erreur(429, "Trop d'essais. Réessaie dans 15 minutes.")
-        c = base.authentifier(identifiant, mdp)
-        if not c:
-            noter_echec(identifiant)
-            raise Erreur(401, "Identifiant ou mot de passe incorrect.")
+        d = self.json_recu()
+        c = base.compte_a_reinitialiser(str(d.get("identifiant", "")).strip())
+        if c:
+            # Mot de passe réinitialisé par l'admin : l'identifiant suffit, la personne choisit le nouveau
+            if not d.get("nouveau"):
+                return self.repondre({"choisir": True})
+            identifiant, mdp = self.identifiants({"identifiant": d.get("identifiant"), "mdp": d["nouveau"]})
+            base.definir_mdp(c["id"], mdp)
+        else:
+            identifiant, mdp = self.identifiants(d)
+            if trop_d_echecs(identifiant):
+                raise Erreur(429, "Trop d'essais. Réessaie dans 15 minutes.")
+            c = base.authentifier(identifiant, mdp)
+            if not c:
+                noter_echec(identifiant)
+                raise Erreur(401, "Identifiant ou mot de passe incorrect.")
         if c["statut"] == "en_attente":
             raise Erreur(403, "Ton compte attend la validation de l'administrateur.")
         if c["statut"] == "refuse":
@@ -299,6 +309,11 @@ class Gestionnaire(SimpleHTTPRequestHandler):
         if d.get("statut") not in ("valide", "refuse") or not isinstance(d.get("id"), int):
             raise Erreur(400)
         base.definir_statut(d["id"], d["statut"])
+        self.repondre({"ok": True})
+
+    def admin_reinitialiser_mdp(self, uid):
+        self.admin()
+        base.reinitialiser_mdp(int(uid))
         self.repondre({"ok": True})
 
     def admin_vider_bibliotheque(self, uid):

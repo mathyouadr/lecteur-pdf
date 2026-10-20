@@ -19,6 +19,7 @@ AUDIO = DONNEES / "audio"              # AUDIO/<lid>/<n° de phrase>.mp3 (ou .wa
 COUVERTURES = DONNEES / "couvertures"  # COUVERTURES/<lid>.<jpg|png|webp>
 VOIX = DONNEES / "voix"                # VOIX/<id>.mp3 : démo de chaque voix du catalogue
 DUREE_SESSION = 30 * 86400
+DUREE_REINIT = 2 * 86400            # délai pour choisir un nouveau mot de passe après une réinitialisation
 EXTENSIONS_AUDIO = ("mp3", "wav")
 DUREE_LIVRE = 30 * 86400           # un livre (PDF, audio, couverture) part 1 mois après sa dernière écoute
 DUREE_PROGRESSION = 60 * 86400     # sa position reste gardée 2 mois après cette dernière écoute
@@ -93,6 +94,7 @@ COLONNES_LIVRES = {
 COLONNES_UTILISATEURS = {
     "connecte_le": "INTEGER",              # dernière connexion (mot de passe saisi)
     "nouveautes": "INTEGER NOT NULL DEFAULT 0",   # dernière présentation des nouveautés vue
+    "reinit_le": "INTEGER",                # mot de passe réinitialisé par l'admin : à choisir à la prochaine connexion
 }
 VERSION_NOUVEAUTES = 1   # à augmenter quand une nouvelle présentation doit s'afficher pour tout le monde
 
@@ -182,12 +184,31 @@ def authentifier(identifiant, mdp):
     return lignes[0] if _mdp_correct(mdp, lignes[0]["empreinte"]) else None
 
 
+def reinitialiser_mdp(uid):
+    """L'ancien mot de passe ne marche plus ; la personne en choisit un nouveau en donnant juste son identifiant."""
+    _sql("UPDATE utilisateurs SET empreinte = ?, reinit_le = ? WHERE id = ? AND admin = 0",
+         (_empreinte(secrets.token_urlsafe(32)), int(time.time()), uid))
+    _sql("DELETE FROM sessions WHERE utilisateur = ?", (uid,))
+
+
+def compte_a_reinitialiser(identifiant):
+    """Compte en attente d'un nouveau mot de passe (réinitialisation de moins de DUREE_REINIT), ou None."""
+    lignes, _ = _sql("SELECT * FROM utilisateurs WHERE identifiant = ? AND reinit_le > ?",
+                     (identifiant, int(time.time()) - DUREE_REINIT))
+    return lignes[0] if lignes else None
+
+
+def definir_mdp(uid, mdp):
+    _sql("UPDATE utilisateurs SET empreinte = ?, reinit_le = NULL WHERE id = ?", (_empreinte(mdp), uid))
+
+
 def utilisateurs():
     """Comptes, avec de quoi les gérer depuis le panel : livres, place sur le disque, positions gardées."""
     comptes = _sql("""SELECT u.id, u.identifiant, u.statut, u.admin, u.cree_le, u.connecte_le,
+                      u.reinit_le > ? reinit,
                       (SELECT COUNT(*) FROM livres l WHERE l.utilisateur = u.id) livres,
                       (SELECT COUNT(*) FROM positions_gardees p WHERE p.utilisateur = u.id) positions
-                      FROM utilisateurs u ORDER BY u.cree_le DESC""")[0]
+                      FROM utilisateurs u ORDER BY u.cree_le DESC""", (int(time.time()) - DUREE_REINIT,))[0]
     octets = {}
     for l in tous_les_livres():
         octets[l["utilisateur"]] = octets.get(l["utilisateur"], 0) + l["octets"]

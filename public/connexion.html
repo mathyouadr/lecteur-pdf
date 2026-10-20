@@ -18,8 +18,11 @@
     <label class="champ">Identifiant
       <input id="identifiant" autocomplete="username" required minlength="3" maxlength="32" pattern="[\w.\-]+">
     </label>
-    <label class="champ">Mot de passe
-      <input id="mdp" type="password" autocomplete="current-password" required minlength="8" maxlength="256">
+    <label class="champ"><span id="libelle-mdp">Mot de passe</span>
+      <input id="mdp" type="password" autocomplete="current-password" minlength="8" maxlength="256">
+    </label>
+    <label class="champ" id="champ-confirmation" hidden>Confirme le mot de passe
+      <input id="confirmation" type="password" autocomplete="new-password" minlength="8" maxlength="256">
     </label>
     <button class="principal" id="valider">Se connecter</button>
     <div class="message" id="message" role="status"></div>
@@ -31,9 +34,14 @@ let mode = "connexion";
 
 function choisir(m) {
   mode = m;
+  $("libelle-mdp").textContent = m === "nouveau" ? "Nouveau mot de passe" : "Mot de passe";
+  $("champ-confirmation").hidden = m !== "nouveau";
+  $("confirmation").required = m === "nouveau";
+  $("mdp").required = m !== "connexion";   // à la connexion, l'identifiant seul suffit après une réinitialisation
+  $("identifiant").readOnly = m === "nouveau";
   $("o-connexion").setAttribute("aria-selected", m === "connexion");
   $("o-inscription").setAttribute("aria-selected", m === "inscription");
-  $("valider").textContent = m === "connexion" ? "Se connecter" : "Demander un compte";
+  $("valider").textContent = { connexion: "Se connecter", inscription: "Demander un compte", nouveau: "Enregistrer et se connecter" }[m];
   $("mdp").autocomplete = m === "connexion" ? "current-password" : "new-password";
   $("message").textContent = m === "inscription" ? "L'administrateur validera ton compte avant ta première connexion." : "";
   $("message").className = "message";
@@ -45,8 +53,15 @@ $("formulaire").onsubmit = async e => {
   e.preventDefault();
   $("valider").disabled = true;
   try {
-    await api(`/api/${mode}`, envoi({ identifiant: $("identifiant").value.trim(), mdp: $("mdp").value }));
-    if (mode === "connexion") return void (location.href = "/bibliotheque.html");
+    if (mode === "nouveau" && $("mdp").value !== $("confirmation").value) throw new Error("Les deux mots de passe ne sont pas identiques.");
+    const r = await api(`/api/${mode === "inscription" ? "inscription" : "connexion"}`,
+                        envoi({ identifiant: $("identifiant").value.trim(), [mode === "nouveau" ? "nouveau" : "mdp"]: $("mdp").value }));
+    if (r.choisir) {
+      choisir("nouveau");
+      $("message").textContent = "Ton mot de passe a été réinitialisé. Choisis-en un nouveau.";
+      return void $("mdp").focus();
+    }
+    if (mode !== "inscription") return void (location.href = "/bibliotheque.html");
     choisir("connexion");
     $("mdp").value = "";
     $("message").textContent = "Demande envoyée ! Tu pourras te connecter dès que l'administrateur l'aura validée.";

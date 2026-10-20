@@ -268,6 +268,7 @@ function afficherComptes() {
     const tr = el("tr");
     const qui = el("td", "", c.identifiant);
     if (c.admin) qui.append(el("span", "pastille", "admin"));
+    if (c.reinit) qui.append(el("span", "pastille", "nouveau mot de passe à choisir"));
     const statut = el("td");
     statut.append(el("span", `statut ${c.statut}`, STATUTS[c.statut]));
     tr.append(qui, statut, el("td", "n", String(c.livres)), el("td", "n", octetsTexte(c.octets)),
@@ -286,6 +287,9 @@ function menuCompte(c) {
     if (c.statut !== "valide") actions.push({ texte: "Valider le compte", faire: async () => action(api("/api/admin/statut", envoi({ id: c.id, statut: "valide" })), `${c.identifiant} validé.`) });
     if (c.statut === "valide") actions.push({ texte: "Révoquer le compte", aide: "La personne est déconnectée tout de suite", question: `Révoquer ${c.identifiant} ?`,
                                               faire: async () => action(api("/api/admin/statut", envoi({ id: c.id, statut: "refuse" })), `${c.identifiant} révoqué.`) });
+    actions.push({ texte: "Réinitialiser le mot de passe", aide: "Déconnecte la personne ; elle en choisit un nouveau en donnant juste son identifiant (48 h pour le faire)",
+                   question: `Réinitialiser le mot de passe de ${c.identifiant} ? Pendant 48 h, n'importe qui connaissant l'identifiant peut choisir le nouveau.`,
+                   faire: async () => action(api(`/api/admin/utilisateurs/${c.id}/mdp`, envoi({})), `Mot de passe de ${c.identifiant} réinitialisé.`) });
     if (c.statut === "en_attente") actions.push({ texte: "Refuser le compte", faire: async () => action(api("/api/admin/statut", envoi({ id: c.id, statut: "refuse" })), `${c.identifiant} refusé.`) });
   }
   if (c.positions) actions.push({ texte: "Oublier ses positions gardées", aide: `${c.positions} position(s) de livres déjà supprimés`, danger: true,
