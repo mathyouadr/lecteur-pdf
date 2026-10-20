@@ -57,6 +57,7 @@ def connexion(identifiant, mdp):
 # Fichiers sensibles jamais servis
 assert appel("/test.db")[0] == 404 and appel("/../base.py")[0] == 404 and appel("/serveur.py")[0] == 404
 assert appel("/bibliotheque.html")[0] == 200
+assert appel("/commun.js")[2]["Cache-Control"] == "no-cache"     # jamais un ancien script après une mise à jour
 
 # Inscription -> en attente -> refus de connexion
 assert appel("/api/inscription", {"identifiant": "alice", "mdp": "motdepasse1"})[0] == 201

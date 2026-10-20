@@ -176,6 +176,10 @@ class Gestionnaire(SimpleHTTPRequestHandler):
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("X-Frame-Options", "DENY")
         self.send_header("Referrer-Policy", "same-origin")
+        if not self.path.startswith("/api/"):
+            # Pages, scripts et styles : toujours revérifiés (304 si inchangés), sinon après une mise à jour
+            # le navigateur peut mélanger une nouvelle page et un ancien commun.js
+            self.send_header("Cache-Control", "no-cache")
         super().end_headers()
 
     def list_directory(self, path):  # pas de listing de dossier
