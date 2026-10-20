@@ -133,7 +133,7 @@ function menuActions(titre, sousTitre, actions) {
 // ---------- Présentation des nouveautés, une fois par compte ----------
 const NOUVEAUTES = [
   { titre: "Tes livres lus par une voix IA",
-    texte: "Ouvre le menu d'un livre et choisis « Livre audio ». Écoute les démos, choisis ta voix : le livre est préparé sur notre serveur, et tu peux l'écouter pendant qu'il se prépare.",
+    texte: "Chaque livre ajouté devient un livre audio, préparé sur notre serveur : tu peux l'écouter pendant qu'il se prépare. Pour changer de voix, ouvre le menu du livre et choisis « Livre audio » : écoute les démos et prends celle qui te plaît.",
     visuel: () => { const v = el("div", "visuel-onde"); for (let i = 0; i < 24; i++) v.append(el("i")); return v; } },
   { titre: "Ta propre couverture",
     texte: "Dans le menu d'un livre, « Changer la couverture » remplace la couverture générée par l'image de ton choix (JPEG, PNG ou WebP).",

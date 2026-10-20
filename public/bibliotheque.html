@@ -47,8 +47,8 @@
 <dialog id="choix-voix" aria-labelledby="choix-titre">
   <h2 id="choix-titre">Livre audio</h2>
   <p class="discret" id="choix-etat"></p>
-  <p class="discret">Écoute les voix, choisis-en une. Tu peux commencer à écouter tout de suite :
-    le livre se prépare devant toi, phrase par phrase.</p>
+  <p class="discret">Écoute les voix, choisis-en une. Changer de voix refait le livre audio ; tu peux
+    l'écouter tout de suite, il se prépare devant toi, phrase par phrase.</p>
   <div id="choix-liste" class="voix-liste" role="radiogroup" aria-label="Voix"></div>
   <div class="pied">
     <button id="choix-supprimer" class="lien danger" hidden>Supprimer le livre audio</button>
@@ -184,7 +184,8 @@ async function importer(fichiers) {
     try {
       if (f.size > MAX) throw new Error("fichier trop gros (50 Mo maximum)");
       const r = await api("/api/livres", { method: "POST", headers: { "Content-Type": "application/pdf", "X-Nom": encodeURIComponent(f.name) }, body: f });
-      toast(r.repris ? `${f.name} ajouté : ta position a été retrouvée.` : `${f.name} ajouté.`);
+      toast(`${f.name} ajouté${r.repris ? ", ta position a été retrouvée" : ""}.` +
+            (r.audio ? " Le livre audio se prépare : tu peux déjà l'écouter." : ""));
     } catch (err) {
       toast(`${f.name} : ${err.message}`, true);
     }

@@ -286,11 +286,12 @@ assert code == 201
 v3 = json.loads(corps)["id"]
 assert base.fichier_demo(v3) and len(json.loads(appel("/api/admin/voix", cookie=admin)[1])) == len(base.VOIX_DEPART) + 1
 
-# Un nouvel import n'est pas transformé tant que la personne ne l'a pas demandé
+# Un nouvel import lance tout de suite le livre audio, avec la voix par défaut (la première du catalogue)
 code, corps, _ = appel("/api/livres", cookie=bob, brut=doc.tobytes(), entetes={"Content-Type": "application/pdf", "X-Nom": "B.pdf"})
 lid_bob = json.loads(corps)["id"]
-assert base.etat_audio(lid_bob) is None and base.file_audio() == 0
-assert appel(f"/api/livres/{lid_bob}/audio", {"voix": v3}, cookie=bob)[0] == 200
+assert json.loads(corps)["audio"] is True
+assert (base.etat_audio(lid_bob), base.livre(None, lid_bob)["voix"], base.file_audio()) == ("attente", v1, 1)
+assert appel(f"/api/livres/{lid_bob}/audio", {"voix": v3}, cookie=bob)[0] == 200     # la personne change de voix
 assert appel(f"/api/admin/voix/{v3}", cookie=admin, methode="DELETE")[0] == 409   # un livre l'attend encore
 assert travaux._tour() is True and base.fichier_audio(None, lid_bob, 0)
 assert appel(f"/api/admin/voix/{v3}", cookie=admin, methode="DELETE")[0] == 200
@@ -305,6 +306,7 @@ long = pymupdf.open()
 long.new_page().insert_text((72, 72), "Un. Deux. Trois. Quatre. Cinq. Six. Sept. Huit.")
 code, corps, _ = appel("/api/livres", cookie=bob, brut=long.tobytes(), entetes={"Content-Type": "application/pdf", "X-Nom": "Long.pdf"})
 lid_long = json.loads(corps)["id"]
+assert appel(f"/api/livres/{lid_long}/audio", cookie=bob, methode="DELETE")[0] == 200   # audio lancé à l'import, annulé
 proprio_long = base.livre(None, lid_long)["utilisateur"]
 assert base.livre(None, lid_long)["total"] == 8
 assert appel(f"/api/livres/{lid_long}/audio/3", cookie=bob)[0] == 404       # pas de livre audio demandé : voix Google
@@ -370,6 +372,7 @@ serveur.ARRETS.clear()
 # L'admin lance lui-même le livre audio d'un livre qui n'en a pas, avec la voix de son choix
 code, corps, _ = appel("/api/livres", cookie=bob, brut=long.tobytes(), entetes={"Content-Type": "application/pdf", "X-Nom": "Sans audio.pdf"})
 lid_sans = json.loads(corps)["id"]
+assert appel(f"/api/livres/{lid_sans}/audio", cookie=bob, methode="DELETE")[0] == 200
 assert base.etat_audio(lid_sans) is None
 assert appel(f"/api/livres/{lid_sans}/audio", {"voix": v2}, cookie=admin)[0] == 200
 file = json.loads(appel("/api/admin/activite", cookie=admin)[1])["file"]

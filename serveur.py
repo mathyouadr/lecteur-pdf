@@ -354,7 +354,12 @@ class Gestionnaire(SimpleHTTPRequestHandler):
             base.definir_couverture(uid, lid, image, "jpg")
         elif COUVERTURES_EN_LIGNE:
             threading.Thread(target=poser_couverture_en_ligne, args=(uid, lid, titre), daemon=True).start()
-        self.repondre({"id": lid, "repris": repris}, code=201)
+        # Le livre audio part tout de suite avec la voix par défaut (la première du catalogue) ;
+        # la personne peut en choisir une autre ensuite, ce qui refait le livre
+        voix = base.liste_voix()
+        if travaux.actif() and voix and base.lancer_audio(uid, lid, voix[0]["id"]):
+            travaux.nouvelle_demande()
+        self.repondre({"id": lid, "repris": repris, "audio": bool(travaux.actif() and voix)}, code=201)
 
     def couverture(self, lid):
         image = self.corps(MAX_IMAGE)
