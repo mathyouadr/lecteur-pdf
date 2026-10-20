@@ -72,7 +72,8 @@ def couverture_en_ligne(titre):
     if not cherches:
         return None
     entetes = {"User-Agent": "lecteur-pdf (auto-hébergé)"}
-    url = f"{OPENLIBRARY}/search.json?" + urlencode({"q": titre, "limit": 5, "fields": "title,author_name,cover_i"})
+    recherche = " ".join(re.findall(r"\w+", titre))       # « george-orwell-1984 » -> « george orwell 1984 »
+    url = f"{OPENLIBRARY}/search.json?" + urlencode({"q": recherche, "limit": 5, "fields": "title,author_name,cover_i"})
     with urllib.request.urlopen(urllib.request.Request(url, headers=entetes), timeout=10) as r:
         resultats = json.loads(r.read()).get("docs", [])
     for doc in resultats:
