@@ -128,9 +128,10 @@ async function boucle(gen) {
   while (enLecture && gen === generation && courant < phrases.length) {
     marquer();
     sauver();
+    const actuelle = son(courant);   // demandée avant la suite : si l'IA la génère à la demande, elle passe en premier
     for (let k = 1; k <= 2 && courant + k < phrases.length; k++) son(courant + k).catch(() => {}); // précharge la suite
     let url, ia;
-    try { ({ url, ia } = await son(courant)); }
+    try { ({ url, ia } = await actuelle); }
     catch (err) { cache.delete(courant); $("etat").textContent = err.message; return pause(); }
     if (gen !== generation) return;
     $("voix").textContent = ia ? "Voix IA" : "Voix Google";

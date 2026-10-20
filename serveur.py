@@ -151,7 +151,7 @@ class Gestionnaire(SimpleHTTPRequestHandler):
             (r"/api/moi", lambda: self.repondre(self.compte())),
             (r"/api/livres", lambda: self.repondre(base.livres(self.compte()["id"]))),
             (r"/api/livres/(\d+)", self.lire_livre),
-            (r"/api/livres/(\d+)/audio/(\d+)", lambda lid, n: self.fichier(base.fichier_audio(self.cible(), int(lid), int(n)))),
+            (r"/api/livres/(\d+)/audio/(\d+)", self.audio_phrase),
             (r"/api/livres/(\d+)/couverture", lambda lid: self.fichier(base.fichier_couverture(self.cible(), int(lid)))),
             (r"/api/admin/utilisateurs", lambda: self.repondre(base.utilisateurs() if self.admin() else [])),
             (r"/api/admin/livres", lambda: self.repondre(base.tous_les_livres() if self.admin() else [])),
@@ -322,6 +322,14 @@ class Gestionnaire(SimpleHTTPRequestHandler):
             self.repondre(synthese(texte), "audio/mpeg")
         except Exception:  # Google injoignable ou limite atteinte
             raise Erreur(502, "La voix Google ne répond pas.")
+
+    def audio_phrase(self, lid, n):
+        """Audio IA d'une phrase : en stock, sinon généré tout de suite et mis en stock. 404 si l'IA n'est pas
+        disponible maintenant (srv-02 endormi) : le lecteur prend alors la voix Google pour cette phrase."""
+        lid, n = int(lid), int(n)
+        if not base.livre_visible(self.cible(), lid):
+            raise Erreur(404, "Introuvable.")
+        self.fichier(base.fichier_audio(None, lid, n) or travaux.phrase_a_la_demande(lid, n))
 
     # ---------- Livre audio demandé par la personne ----------
     def catalogue(self):

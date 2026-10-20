@@ -343,6 +343,11 @@ def _fichiers_audio(lid):
     return [f for f in dossier.iterdir() if f.suffix[1:] in EXTENSIONS_AUDIO] if dossier.is_dir() else []
 
 
+def livre_visible(uid, lid):
+    filtre, p = _proprio(uid)
+    return bool(_sql(f"SELECT 1 FROM livres WHERE id = ? AND {filtre}", (lid, *p))[0])
+
+
 def fichier_audio(uid, lid, n):
     """Fichier audio IA de la phrase n, ou None s'il n'est pas (encore) généré."""
     filtre, p = _proprio(uid)
@@ -394,6 +399,22 @@ def annuler_audio(uid, lid):
 
 def compter_audio(lid):
     _sql("UPDATE livres SET audio_faits = ? WHERE id = ?", (len(_fichiers_audio(lid)), lid))
+
+
+def phrases_generees(lid):
+    """Numéros des phrases dont l'audio IA est en stock."""
+    return {int(f.stem) for f in _fichiers_audio(lid) if f.stem.isdigit()}
+
+
+def position(lid):
+    """Phrase où le propriétaire en est (enregistrée par le lecteur à chaque phrase)."""
+    lignes, _ = _sql("SELECT phrase FROM livres WHERE id = ?", (lid,))
+    return lignes[0]["phrase"] if lignes else 0
+
+
+def info_audio(lid):
+    lignes, _ = _sql("SELECT voix, audio_etat FROM livres WHERE id = ?", (lid,))
+    return lignes[0] if lignes else None
 
 
 def prochain_travail():
