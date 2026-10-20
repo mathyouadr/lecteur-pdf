@@ -29,11 +29,15 @@
   </div>
 </main>
 <input id="fichier" type="file" accept="application/pdf" multiple hidden>
+<input id="image" type="file" accept="image/jpeg,image/png,image/webp" hidden>
 <div id="depot-global">Dépose tes PDF ici</div>
 <script src="/commun.js"></script>
 <script>
 const MAX = 50 * 1024 * 1024;
+const MAX_IMAGE = 5 * 1024 * 1024;
 let enImport = 0;
+let livreImage = null;     // livre dont on change la couverture
+let rafraichir = null;     // minuterie tant qu'un livre audio est en cours de génération
 
 api("/api/moi").then(m => {
   $("moi").textContent = m.identifiant;
@@ -47,6 +51,8 @@ async function charger() {
   grille.replaceChildren(...livres.map(tuile), tuileAjout());
   $("vide").hidden = livres.length > 0 || enImport > 0;
   grille.hidden = !$("vide").hidden;
+  clearTimeout(rafraichir);
+  if (livres.some(l => ["attente", "encours"].includes(l.audio_etat))) rafraichir = setTimeout(charger, 20000);
 }
 
 function afficherReprendre(l) {
@@ -66,7 +72,7 @@ function afficherReprendre(l) {
   play.className = "lecture-btn";
   play.textContent = "▶";
   play.setAttribute("aria-hidden", "true");
-  a.append(couverture(l.titre), infos, play);
+  a.append(couverture(l), infos, play);
   zone.replaceChildren(a);
 }
 
@@ -74,7 +80,7 @@ function tuile(l) {
   const a = document.createElement("a");
   a.className = "livre";
   a.href = `/lecteur.html?livre=${l.id}`;
-  const c = couverture(l.titre);
+  const c = couverture(l);
   c.append(barre(pourcent(l)));
   const nom = document.createElement("div");
   nom.className = "nom";
@@ -84,6 +90,9 @@ function tuile(l) {
   etat.className = "etat";
   const p = pourcent(l);
   etat.textContent = p >= 1 ? "Terminé" : l.lu_le ? `${Math.round(p * 100)} %` : "Nouveau";
+  const audio = document.createElement("div");
+  audio.className = "audio";
+  audio.textContent = texteAudio(l);
   const suppr = document.createElement("button");
   suppr.className = "suppr";
   suppr.textContent = "✕";
@@ -94,7 +103,21 @@ function tuile(l) {
     await api(`/api/livres/${l.id}`, { method: "DELETE" });
     charger();
   };
-  a.append(suppr, c, nom, etat);
+  const image = document.createElement("button");
+  image.className = "image-btn";
+  image.textContent = "🖼";
+  image.title = "Changer la couverture";
+  image.setAttribute("aria-label", `Changer la couverture de ${l.titre}`);
+  image.onclick = async e => {
+    e.preventDefault();
+    if (l.couverture && confirm("Revenir à la couverture générée ?\n(Annuler pour choisir une autre image.)")) {
+      await api(`/api/livres/${l.id}/couverture`, { method: "DELETE" });
+      return charger();
+    }
+    livreImage = l;
+    $("image").click();
+  };
+  a.append(suppr, image, c, nom, etat, audio);
   return a;
 }
 
@@ -130,6 +153,21 @@ async function importer(fichiers) {
 }
 
 $("fichier").onchange = e => { importer(e.target.files); e.target.value = ""; };
+
+$("image").onchange = async e => {
+  const f = e.target.files[0];
+  e.target.value = "";
+  if (!f || !livreImage) return;
+  try {
+    if (f.size > MAX_IMAGE) throw new Error("image trop grosse (5 Mo maximum)");
+    await api(`/api/livres/${livreImage.id}/couverture`, { method: "POST", headers: { "Content-Type": f.type }, body: f });
+    $("message").textContent = "";
+  } catch (err) {
+    $("message").textContent = `Couverture : ${err.message}`;
+    $("message").className = "message erreur";
+  }
+  charger();
+};
 
 // Glisser-déposer n'importe où sur la page
 let profondeur = 0;

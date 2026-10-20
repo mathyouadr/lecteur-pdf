@@ -25,20 +25,39 @@ function teinte(titre) {
   return h;
 }
 
-function couverture(titre) {
-  const h = teinte(titre);
+// Livre l : la couverture importée par la personne si elle existe, sinon la couverture générée
+function couverture(l) {
+  const h = teinte(l.titre);
   const div = document.createElement("div");
   div.className = "couv";
   div.style.background = `linear-gradient(150deg, hsl(${h} 55% 45%), hsl(${(h + 35) % 360} 60% 14%))`;
   div.style.setProperty("--lueur", `hsl(${h} 80% 55% / .45)`);
   const t = document.createElement("div");
   t.className = "t";
-  t.textContent = titre;
+  t.textContent = l.titre;
   const filet = document.createElement("div");
   filet.className = "filet";
   div.append(t, filet);
+  if (l.couverture) {
+    const img = new Image();
+    img.className = "image";
+    img.alt = "";
+    img.src = `/api/livres/${l.id}/couverture?${l.couverture}`;
+    img.onerror = () => { img.remove(); div.classList.remove("avec-image"); };
+    div.classList.add("avec-image");
+    div.prepend(img);
+  }
   return div;
 }
+
+// État du livre audio IA, en une ligne, ou "" s'il n'y en a pas
+function texteAudio(l) {
+  const p = l.total ? Math.floor((l.audio_faits / l.total) * 100) : 0;
+  return { attente: "Livre audio en attente", encours: `Livre audio : ${p} %`, pause: `Livre audio en pause (${p} %)`,
+           pret: "Livre audio prêt", erreur: "Livre audio : erreur" }[l.audio_etat] || "";
+}
+
+const octetsTexte = o => o > 1e9 ? `${(o / 1e9).toFixed(1).replace(".", ",")} Go` : `${Math.round(o / 1e6)} Mo`;
 
 function barre(fraction) {
   const p = document.createElement("div");

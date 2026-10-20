@@ -5,3 +5,6 @@ __pycache__/
 *.pyc
 .superpowers/
 .playwright-mcp/
+
+# Configuration de production (clés, jetons)
+lecteur.env

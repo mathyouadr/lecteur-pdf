@@ -64,8 +64,8 @@ h2 { font-size: 22px; margin: 36px 0 16px; }
 .onglets button { border: 0; background: none; color: var(--doux); }
 .onglets button[aria-selected="true"] { background: var(--verre-fort); color: var(--texte); }
 .champ { display: grid; gap: 6px; margin-bottom: 14px; font-size: 13px; color: var(--doux); }
-.champ input { padding: 11px 14px; border-radius: 12px; border: 1px solid var(--bord); background: rgba(0, 0, 0, .3); font-size: 15px; }
-.champ input:focus { outline: none; border-color: var(--accent); }
+.champ input, .reglage input { padding: 11px 14px; border-radius: 12px; border: 1px solid var(--bord); background: rgba(0, 0, 0, .3); font-size: 15px; }
+.champ input:focus, .reglage input:focus { outline: none; border-color: var(--accent); }
 .carte button.principal { width: 100%; padding: 12px; margin-top: 6px; }
 .carte .message { margin-top: 14px; text-align: center; }
 
@@ -82,6 +82,8 @@ h2 { font-size: 22px; margin: 36px 0 16px; }
 .prog i { display: block; height: 100%; background: var(--degrade); }
 .prog i.fini { background: var(--ok); }
 .couv .prog { position: absolute; left: 0; right: 0; bottom: 0; }
+.couv .image { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.couv.avec-image .t, .couv.avec-image .filet { visibility: hidden; }
 
 /* ---------- Reprendre ---------- */
 .reprendre {
@@ -105,12 +107,14 @@ h2 { font-size: 22px; margin: 36px 0 16px; }
 .livre:hover .couv, .livre:focus-visible .couv { transform: translateY(-4px); box-shadow: 0 22px 40px rgba(0, 0, 0, .6), 0 0 30px var(--lueur); }
 .livre .nom { margin-top: 10px; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .livre .etat { font-size: 12px; color: var(--doux); }
-.livre .suppr {
+.livre .audio { font-size: 12px; color: var(--accent); }
+.livre .suppr, .livre .image-btn {
   position: absolute; top: 8px; right: 8px; z-index: 2; width: 30px; height: 30px; padding: 0; border-radius: 50%;
   background: rgba(0, 0, 0, .55); border: 0; color: #fff; opacity: 0; transition: opacity .2s;
 }
-.livre:hover .suppr, .livre .suppr:focus-visible { opacity: 1; }
-@media (hover: none) { .livre .suppr { opacity: .8; } }
+.livre .image-btn { right: auto; left: 8px; }
+.livre:hover .suppr, .livre .suppr:focus-visible, .livre:hover .image-btn, .livre .image-btn:focus-visible { opacity: 1; }
+@media (hover: none) { .livre .suppr, .livre .image-btn { opacity: .8; } }
 
 .ajout {
   aspect-ratio: 2 / 3; border-radius: 10px; border: 2px dashed var(--bord); background: none;
@@ -151,6 +155,12 @@ body.survol #depot-global { display: grid; }
 .ligne .ok { border-color: rgba(127, 220, 138, .5); color: var(--ok); }
 .ligne .non { border-color: rgba(255, 122, 133, .4); color: var(--danger); }
 .pastille { font-size: 11px; padding: 2px 8px; border-radius: 999px; background: var(--verre-fort); color: var(--doux); margin-left: 6px; }
+.ligne .mini { width: 34px; flex: none; padding: 4px; border-radius: 4px; }
+.ligne .mini .t { font-size: 6px; }
+.ligne a.lien { margin-right: auto; }
+.reglage { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+.reglage input { flex: 1 1 220px; }
+.reglage input.court { flex: 0 0 90px; }
 
 /* ---------- Statistiques ---------- */
 .titre-stats { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }

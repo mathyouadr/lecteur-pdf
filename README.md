@@ -2,16 +2,20 @@
 
 Un lecteur de PDF à voix haute, auto-hébergé. On importe ses livres en PDF, on clique sur une phrase, et la voix de Google Traduction (accent de France) lit la suite pendant que chaque phrase est surlignée. La lecture reprend là où on s'était arrêté, sur n'importe quel appareil.
 
+En option, chaque livre importé devient un **livre audio** à voix IA, généré par [VoiceStudio](https://github.com/debpalash/VoiceStudio) sur un serveur à carte graphique réveillé à la demande. La voix Google sert le temps que l'IA travaille, puis le lecteur passe tout seul sur la voix IA, phrase par phrase.
+
 L'accès est fermé : chacun peut demander un compte, mais seul l'administrateur peut le valider.
 
 ![Bibliothèque](docs/captures/bibliotheque.png)
 
 ## Fonctionnalités
 
-- **Bibliothèque personnelle** : chaque compte a ses propres livres, avec une couverture générée à partir du titre et une barre de progression. Une carte « Reprendre la lecture » mène directement au dernier livre ouvert. Import par glisser-déposer, jusqu'à 50 Mo par PDF.
+- **Bibliothèque personnelle** : chaque compte a ses propres livres, avec une couverture générée à partir du titre (ou une image importée : JPEG, PNG ou WebP, 5 Mo maximum) et une barre de progression. Une carte « Reprendre la lecture » mène directement au dernier livre ouvert. Import par glisser-déposer, jusqu'à 50 Mo par PDF.
+- **Livres audio IA** (optionnel) : à l'import, le livre part dans une file de génération. Le serveur VoiceStudio est réveillé par Wake-on-LAN, chaque phrase est générée puis rangée ici, en commençant là où la personne en est. Le livre audio reste donc écoutable quand le serveur IA est éteint. Si c'est la file qui l'a réveillé, il est éteint 10 minutes après la fin du travail.
 - **Lecture à voix haute** : la phrase en cours est surlignée et suivie à l'écran. On clique sur n'importe quelle phrase pour lire à partir de là. Vitesse de 0,8× à 5×, sans changer la hauteur de la voix. Les deux phrases suivantes sont préparées à l'avance pour éviter les blancs.
 - **Progression enregistrée** : la phrase atteinte et la vitesse choisie sont sauvegardées pour chaque livre.
 - **Comptes validés par l'admin** : inscription libre, mais connexion impossible tant que l'admin n'a pas validé le compte. Une révocation déconnecte la personne immédiatement.
+- **Panel admin** : valider, révoquer ou supprimer un compte (avec ses livres et fichiers) ; voir et écouter les livres de chacun en lecture seule (sa progression et ses stats ne bougent pas) ; supprimer un livre ; piloter les livres audio (générer, pause, relancer, supprimer) ; choisir la voix IA et l'écouter ; réveiller ou éteindre le serveur IA ; voir la place prise sur le disque.
 - **Statistiques** : temps d'écoute réel (pauses exclues), minutes par jour sur 30 jours, livres en cours et terminés, jours d'affilée, livres les plus écoutés. Chacun voit les siennes ; l'admin voit celles de tout le monde.
 - **Extraction propre du texte** : les paragraphes sont reconstitués, les mots coupés en fin de ligne recollés, les numéros de page supprimés et les ligatures (ﬁ, ﬃ) remplacées par les lettres correspondantes.
 
@@ -80,7 +84,19 @@ PrivateTmp=yes
 WantedBy=multi-user.target
 ```
 
-Toutes les données sont stockées dans `donnees/` : la base SQLite `lecteur.db` et les PDF importés dans `livres/`. Sauvegarder ce dossier suffit. La base est créée et mise à jour automatiquement au démarrage.
+Toutes les données sont stockées dans `donnees/` : la base SQLite `lecteur.db`, les PDF importés dans `livres/`, les livres audio dans `audio/` (un MP3 par phrase, environ 250 Mo pour un roman de 11 h) et les couvertures dans `couvertures/`. Sauvegarder ce dossier suffit. La base est créée et mise à jour automatiquement au démarrage.
+
+### Livres audio IA
+
+Sans `VOICESTUDIO_CLE`, le lecteur fonctionne comme avant, avec la seule voix Google. Pour activer les livres audio, copier `lecteur.env.exemple` en `/opt/lecteur/lecteur.env` (droits `600`), le remplir, ajouter `EnvironmentFile=/opt/lecteur/lecteur.env` au service systemd, et installer `ffmpeg` (sinon les phrases restent en WAV, environ 10 fois plus lourd).
+
+| Variable | Rôle |
+|---|---|
+| `VOICESTUDIO_URL`, `VOICESTUDIO_CLE` | API VoiceStudio (réseau local uniquement) et sa clé admin |
+| `SRV02_MAC` | Adresse MAC du serveur IA, pour le réveiller par Wake-on-LAN (même réseau local) |
+| `PVE_URL`, `PVE_NOEUD`, `PVE_JETON`, `PVE_CA` | Extinction automatique par l'API Proxmox, avec un jeton qui n'a que le droit `Sys.PowerMgmt` sur ce nœud. Sans jeton, le serveur IA reste allumé. |
+
+La file s'arrête proprement si le serveur IA s'éteint en cours de route : elle le réveille et reprend au tour suivant. Le serveur IA n'est jamais éteint automatiquement s'il était déjà allumé ou s'il a été réveillé à la main depuis le panel.
 
 ## Sécurité
 
@@ -88,7 +104,9 @@ Toutes les données sont stockées dans `donnees/` : la base SQLite `lecteur.db`
 - Cookie de session `HttpOnly`, `SameSite=Lax`, et `Secure` derrière HTTPS. Les sessions durent 30 jours.
 - Blocage de 15 minutes après 5 mauvais mots de passe sur un même identifiant.
 - Seul le dossier `public/` est servi : la base et le code source ne sont pas téléchargeables.
-- Chaque requête vérifie le propriétaire : un compte ne peut ni lire, ni modifier, ni voir les statistiques des livres d'un autre.
+- Chaque requête vérifie le propriétaire : un compte ne peut ni lire, ni modifier, ni voir les statistiques des livres d'un autre. Seul l'admin voit tout.
+- Couvertures acceptées d'après leurs premiers octets (JPEG, PNG, WebP), jamais de SVG.
+- La clé VoiceStudio et le jeton Proxmox restent sur le serveur, dans un fichier lisible par le seul service ; le navigateur ne parle jamais au serveur IA.
 
 ## Structure
 
@@ -96,7 +114,8 @@ Toutes les données sont stockées dans `donnees/` : la base SQLite `lecteur.db`
 |---|---|
 | `serveur.py` | Serveur HTTP (bibliothèque standard), routes de l'API, synthèse vocale |
 | `base.py` | Schéma SQLite, comptes, sessions, livres, progression, statistiques |
-| `extraction.py` | Extraction du texte des PDF en paragraphes lisibles |
+| `extraction.py` | Extraction du texte des PDF en paragraphes lisibles, découpage en phrases |
+| `travaux.py` | File de génération des livres audio, Wake-on-LAN et extinction du serveur IA |
 | `public/` | Interface : connexion, bibliothèque, lecteur, statistiques, admin |
 | `test_serveur.py` | Test de bout en bout de l'API, sur une base jetable |
 

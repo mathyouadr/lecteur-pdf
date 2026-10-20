@@ -38,7 +38,28 @@ def paragraphes(donnees: bytes, premiere: int = 1, derniere: int | None = None) 
     return [re.sub(r"\s+", " ", unicodedata.normalize("NFKC", p)) for p in sortie]  # NFKC : ligatures ﬁ ﬃ → fi ffi
 
 
+# Fin de phrase : ponctuation forte (et guillemet ou parenthèse fermants), puis espace, puis début de phrase
+FIN = re.compile(r"[.!?…]+(?:\s*[»”\"')\]])*\s+(?=[«“\"'(\[—–-]|\d|[A-ZÀ-ÖØ-ÞŒ])")  # « Bonjour ! » : espace avant »
+ABREVIATIONS = {"m", "mm", "mme", "mmes", "mlle", "mlles", "dr", "pr", "me", "st", "ste", "cf", "p", "etc", "vol", "chap", "no", "n°"}
+
+
+def phrases(paragraphe: str) -> list[str]:
+    """Découpe un paragraphe en phrases. Fait sur le serveur pour que la voix Google, la voix IA et
+    la progression (numéro de phrase) utilisent exactement le même découpage."""
+    sortie, debut = [], 0
+    for m in FIN.finditer(paragraphe):
+        mot = paragraphe[debut:m.start()].rsplit(None, 1)[-1:] or [""]
+        mot = mot[0].lower().strip("«“\"'(")
+        if mot in ABREVIATIONS or (len(mot) == 1 and mot.isalpha()):  # « M. Smith », « J. Orwell »
+            continue
+        sortie.append(paragraphe[debut:m.end()].strip())
+        debut = m.end()
+    if paragraphe[debut:].strip():
+        sortie.append(paragraphe[debut:].strip())
+    return sortie
+
+
 if __name__ == "__main__":
     import sys
     for p in paragraphes(open(sys.argv[1], "rb").read())[:int(sys.argv[2]) if len(sys.argv) > 2 else 20]:
-        print("¶", p)
+        print("¶", " | ".join(phrases(p)))

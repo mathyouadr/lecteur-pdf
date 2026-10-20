@@ -15,15 +15,43 @@
     <a class="lien" href="/bibliotheque.html">← Bibliothèque</a>
   </div>
 </header>
-<main class="page" style="max-width:720px">
-  <h1>Comptes</h1>
+<main class="page" style="max-width:820px">
+  <h1>Administration</h1>
   <div class="message" id="message" role="status"></div>
-  <h2>En attente</h2>
+
+  <h2>srv-02 et livres audio</h2>
+  <div class="ligne">
+    <div class="qui"><span id="srv02-etat">…</span><small id="srv02-detail"></small></div>
+    <button id="reveiller" class="ok">Réveiller</button>
+    <button id="eteindre" class="non">Éteindre</button>
+  </div>
+
+  <h2>Voix IA</h2>
+  <div class="ligne">
+    <div class="qui">
+      <small>Une seule voix pour tous les livres audio. La changer ne touche pas aux livres déjà générés (utilise « Relancer » pour les refaire).</small>
+      <div class="reglage" style="margin-top:10px">
+        <input id="instruct" maxlength="200" aria-label="Description de la voix" placeholder="male, middle-aged, low pitch">
+        <input id="seed" class="court" inputmode="numeric" aria-label="Graine" placeholder="42">
+        <button id="enregistrer-voix">Enregistrer</button>
+      </div>
+      <div class="reglage" style="margin-top:10px">
+        <input id="essai-texte" maxlength="300" aria-label="Texte d'essai" value="C'était une belle et froide journée d'avril, les horloges affichaient treize heures.">
+        <button id="essai">Écouter un essai</button>
+      </div>
+    </div>
+  </div>
+
+  <h2>Comptes</h2>
+  <h3>En attente</h3>
   <div id="en_attente"></div>
-  <h2>Validés</h2>
+  <h3>Validés</h3>
   <div id="valide"></div>
-  <h2>Refusés</h2>
+  <h3>Refusés</h3>
   <div id="refuse"></div>
+
+  <h2>Toutes les bibliothèques <small class="discret" id="espace"></small></h2>
+  <div id="livres"></div>
 </main>
 <script src="/commun.js"></script>
 <script>
@@ -33,47 +61,139 @@ const ACTIONS = {
   refuse: [["Valider", "valide", "ok"]],
 };
 
-async function charger() {
-  let comptes;
-  try { comptes = await api("/api/admin/utilisateurs"); }
-  catch (err) { $("message").textContent = err.message; $("message").className = "message erreur"; return; }
-  for (const statut of Object.keys(ACTIONS)) {
-    const liste = comptes.filter(c => c.statut === statut);
-    $(statut).replaceChildren(...(liste.length ? liste.map(ligne) : [vide()]));
+function erreur(err) {
+  $("message").textContent = err.message;
+  $("message").className = "message erreur";
+}
+
+async function action(promesse) {
+  try { await promesse; $("message").textContent = ""; } catch (err) { erreur(err); }
+  charger();
+}
+
+function el(balise, classe, texte) {
+  const e = document.createElement(balise);
+  if (classe) e.className = classe;
+  if (texte !== undefined) e.textContent = texte;
+  return e;
+}
+
+function bouton(texte, classe, quand) {
+  const b = el("button", classe, texte);
+  b.onclick = quand;
+  return b;
+}
+
+// ---------- srv-02 ----------
+let minuterie = null;
+async function chargerSrv02() {
+  clearTimeout(minuterie);
+  let s;
+  try { s = await api("/api/admin/srv02"); } catch (err) { return erreur(err); }
+  if (!s.configure) {
+    $("srv02-etat").textContent = "Livres audio désactivés";
+    $("srv02-detail").textContent = "VOICESTUDIO_CLE n'est pas configurée sur ce serveur : seule la voix Google est utilisée.";
+  } else {
+    $("srv02-etat").textContent = s.voicestudio ? "VoiceStudio en ligne" : "srv-02 éteint ou VoiceStudio indisponible";
+    const details = [`${s.file} livre(s) dans la file`];
+    if (s.manuel) details.push("allumé à la main : pas d'extinction automatique");
+    else if (s.reveil_auto) details.push(s.extinction ? "réveillé par la file : extinction 10 min après la fin" : "réveillé par la file");
+    if (s.message) details.push(s.message);
+    $("srv02-detail").textContent = details.join(" · ");
   }
+  $("reveiller").disabled = !s.wol || s.voicestudio;
+  $("eteindre").disabled = !s.extinction || !s.voicestudio;
+  minuterie = setTimeout(chargerSrv02, 15000);
+}
+$("reveiller").onclick = () => action(api("/api/admin/srv02", envoi({ action: "reveiller" })));
+$("eteindre").onclick = () => {
+  if (confirm("Éteindre srv-02 ? La génération en cours s'arrêtera (elle reprendra au prochain réveil).")) {
+    action(api("/api/admin/srv02", envoi({ action: "eteindre" })));
+  }
+};
+
+// ---------- Voix ----------
+api("/api/admin/voix").then(v => { $("instruct").value = v.instruct; $("seed").value = v.seed; }).catch(erreur);
+$("enregistrer-voix").onclick = () => action(api("/api/admin/voix", envoi({ instruct: $("instruct").value, seed: $("seed").value })));
+$("essai").onclick = async () => {
+  $("essai").disabled = true;
+  $("essai").textContent = "Génération…";
+  try {
+    const b = await api("/api/admin/voix/essai", envoi({ texte: $("essai-texte").value }));
+    new Audio(URL.createObjectURL(b)).play();
+  } catch (err) { erreur(err); }
+  $("essai").disabled = false;
+  $("essai").textContent = "Écouter un essai";
+};
+
+// ---------- Comptes ----------
+function ligneCompte(c) {
+  const d = el("div", "ligne");
+  const qui = el("div", "qui", c.identifiant);
+  if (c.admin) qui.append(el("span", "pastille", "admin"));
+  qui.append(el("small", "", `Inscrit le ${new Date(c.cree_le * 1000).toLocaleDateString("fr-FR", { dateStyle: "long" })}`));
+  d.append(qui);
+  if (c.admin) return d;
+  for (const [texte, statut, classe] of ACTIONS[c.statut]) {
+    d.append(bouton(texte, classe, () => action(api("/api/admin/statut", envoi({ id: c.id, statut })))));
+  }
+  d.append(bouton("Supprimer", "non", () => {
+    if (confirm(`Supprimer définitivement le compte « ${c.identifiant} », tous ses livres, couvertures et livres audio ?`)) {
+      action(api(`/api/admin/utilisateurs/${c.id}`, { method: "DELETE" }));
+    }
+  }));
+  return d;
+}
+
+// ---------- Livres de tout le monde ----------
+const AUDIO = {   // actions proposées selon l'état du livre audio : [texte, action, classe, confirmation]
+  null: [["Générer l'audio", "generer", "ok"]],
+  attente: [["Pause", "pause"]],
+  encours: [["Pause", "pause"]],
+  pause: [["Reprendre", "generer", "ok"], ["Suppr. audio", "supprimer", "non", "Supprimer le livre audio déjà généré ?"]],
+  pret: [["Relancer", "relancer", "", "Refaire tout le livre audio avec la voix actuelle ?"], ["Suppr. audio", "supprimer", "non", "Supprimer le livre audio ?"]],
+  erreur: [["Reprendre", "generer", "ok"], ["Relancer", "relancer", "", "Tout refaire depuis le début ?"]],
+};
+
+function ligneLivre(l) {
+  const d = el("div", "ligne");
+  const c = couverture(l);
+  c.classList.add("mini");
+  const qui = el("div", "qui", l.titre);
+  qui.append(el("span", "pastille", l.identifiant));
+  const infos = [`Lu à ${Math.round(pourcent(l) * 100)} %`, texteAudio(l) || "Pas de livre audio", octetsTexte(l.octets)];
+  qui.append(el("small", "", infos.join(" · ")));
+  const ouvrir = el("a", "lien", "Ouvrir");
+  ouvrir.href = `/lecteur.html?livre=${l.id}`;
+  d.append(c, qui, ouvrir);
+  for (const [texte, act, classe, question] of AUDIO[l.audio_etat] || []) {
+    d.append(bouton(texte, classe, () => {
+      if (!question || confirm(question)) action(api(`/api/admin/livres/${l.id}/audio`, envoi({ action: act })));
+    }));
+  }
+  d.append(bouton("Supprimer", "non", () => {
+    if (confirm(`Supprimer « ${l.titre} » de la bibliothèque de ${l.identifiant} (PDF, couverture et livre audio) ?`)) {
+      action(api(`/api/livres/${l.id}`, { method: "DELETE" }));
+    }
+  }));
+  return d;
 }
 
 function vide() {
-  const d = document.createElement("div");
-  d.className = "discret";
-  d.textContent = "Personne.";
-  return d;
+  return el("div", "discret", "Personne.");
 }
 
-function ligne(c) {
-  const d = document.createElement("div");
-  d.className = "ligne";
-  const qui = document.createElement("div");
-  qui.className = "qui";
-  qui.textContent = c.identifiant;
-  if (c.admin) {
-    const p = document.createElement("span");
-    p.className = "pastille";
-    p.textContent = "admin";
-    qui.append(p);
+async function charger() {
+  let comptes, livres;
+  try { [comptes, livres] = await Promise.all([api("/api/admin/utilisateurs"), api("/api/admin/livres")]); }
+  catch (err) { return erreur(err); }
+  for (const statut of Object.keys(ACTIONS)) {
+    const liste = comptes.filter(c => c.statut === statut);
+    $(statut).replaceChildren(...(liste.length ? liste.map(ligneCompte) : [vide()]));
   }
-  const date = document.createElement("small");
-  date.textContent = `Inscrit le ${new Date(c.cree_le * 1000).toLocaleDateString("fr-FR", { dateStyle: "long" })}`;
-  qui.append(date);
-  d.append(qui);
-  if (!c.admin) for (const [texte, statut, classe] of ACTIONS[c.statut]) {
-    const b = document.createElement("button");
-    b.textContent = texte;
-    b.className = classe;
-    b.onclick = async () => { await api("/api/admin/statut", envoi({ id: c.id, statut })); charger(); };
-    d.append(b);
-  }
-  return d;
+  $("livres").replaceChildren(...(livres.length ? livres.map(ligneLivre) : [el("div", "discret", "Aucun livre.")]));
+  $("espace").textContent = `· ${octetsTexte(livres.reduce((s, l) => s + l.octets, 0))} sur le disque`;
+  chargerSrv02();
 }
 
 charger();

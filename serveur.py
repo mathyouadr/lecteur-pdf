@@ -1,4 +1,5 @@
-"""Lecteur PDF à voix haute : comptes validés par l'admin, bibliothèque personnelle, voix Google France.
+"""Lecteur PDF à voix haute : comptes validés par l'admin, bibliothèque personnelle, voix Google France
+en attendant le livre audio généré par l'IA (VoiceStudio, voir travaux.py).
 
 Lancer :            python serveur.py
 Créer l'admin :     python serveur.py --admin <identifiant>
@@ -18,12 +19,18 @@ from urllib.parse import parse_qs, unquote, urlsplit
 from gtts import gTTS
 
 import base
+import travaux
 from extraction import paragraphes
 
 PUBLIC = Path(__file__).parent / "public"
 PORT = 8765
 MAX_PDF = 50 * 1024 * 1024
+MAX_IMAGE = 5 * 1024 * 1024
 MAX_JSON = 16 * 1024
+# Couvertures : formats reconnus à leurs premiers octets (jamais de SVG, qui peut contenir du script)
+IMAGES = {b"\xff\xd8\xff": ("jpg", "image/jpeg"), b"\x89PNG\r\n\x1a\n": ("png", "image/png")}
+TYPES = {"jpg": "image/jpeg", "png": "image/png", "webp": "image/webp", "mp3": "audio/mpeg", "wav": "audio/wav"}
+ACTIONS_AUDIO = ("generer", "pause", "relancer", "supprimer")
 SECURE = "; Secure" if os.environ.get("LECTEUR_HTTPS") == "1" else ""
 IDENTIFIANT = re.compile(r"[\w.-]{3,32}")
 
@@ -70,14 +77,24 @@ class Gestionnaire(SimpleHTTPRequestHandler):
             raise Erreur(401, "Connexion requise.")
         return c
 
+    def cible(self):
+        """Propriétaire à imposer pour lire ou modifier un livre : soi-même, ou None (tous) pour l'admin."""
+        c = self.compte()
+        return None if c["admin"] else c["id"]
+
     def corps(self, limite):
         try:
             taille = int(self.headers.get("Content-Length", 0))
         except ValueError:
             raise Erreur(400)
         if taille > limite:
-            raise Erreur(413, "Fichier trop gros (50 Mo maximum).")
+            raise Erreur(413, f"Fichier trop gros ({limite // 1024 // 1024} Mo maximum).")
         return self.rfile.read(taille)
+
+    def fichier(self, chemin):
+        if not chemin:
+            raise Erreur(404, "Introuvable.")
+        self.repondre(chemin.read_bytes(), TYPES[chemin.suffix[1:]])
 
     def json_recu(self):
         try:
@@ -134,7 +151,12 @@ class Gestionnaire(SimpleHTTPRequestHandler):
             (r"/api/moi", lambda: self.repondre(self.compte())),
             (r"/api/livres", lambda: self.repondre(base.livres(self.compte()["id"]))),
             (r"/api/livres/(\d+)", self.lire_livre),
+            (r"/api/livres/(\d+)/audio/(\d+)", lambda lid, n: self.fichier(base.fichier_audio(self.cible(), int(lid), int(n)))),
+            (r"/api/livres/(\d+)/couverture", lambda lid: self.fichier(base.fichier_couverture(self.cible(), int(lid)))),
             (r"/api/admin/utilisateurs", lambda: self.repondre(base.utilisateurs() if self.admin() else [])),
+            (r"/api/admin/livres", lambda: self.repondre(base.tous_les_livres() if self.admin() else [])),
+            (r"/api/admin/srv02", lambda: self.repondre(travaux.etat_public() if self.admin() else {})),
+            (r"/api/admin/voix", lambda: self.repondre(travaux.voix() if self.admin() else {})),
             (r"/api/stats", self.stats),
             (r"/api/admin/stats", lambda: self.repondre(base.stats_par_utilisateur() if self.admin() else [])),
         ])
@@ -146,12 +168,21 @@ class Gestionnaire(SimpleHTTPRequestHandler):
             (r"/api/deconnexion", self.deconnexion),
             (r"/api/livres", self.importer),
             (r"/api/livres/(\d+)/progression", self.progression),
+            (r"/api/livres/(\d+)/couverture", self.couverture),
             (r"/api/admin/statut", self.statut),
+            (r"/api/admin/livres/(\d+)/audio", self.admin_audio),
+            (r"/api/admin/srv02", self.admin_srv02),
+            (r"/api/admin/voix", self.admin_voix),
+            (r"/api/admin/voix/essai", self.admin_essai),
             (r"/api/tts", self.tts),
         ])
 
     def do_DELETE(self):
-        self.traiter([(r"/api/livres/(\d+)", self.supprimer)])
+        self.traiter([
+            (r"/api/livres/(\d+)", self.supprimer),
+            (r"/api/livres/(\d+)/couverture", self.retirer_couverture),
+            (r"/api/admin/utilisateurs/(\d+)", self.supprimer_utilisateur),
+        ])
 
     # ---------- Comptes ----------
     def identifiants(self):
@@ -203,11 +234,20 @@ class Gestionnaire(SimpleHTTPRequestHandler):
         base.definir_statut(d["id"], d["statut"])
         self.repondre({"ok": True})
 
+    def supprimer_utilisateur(self, uid):
+        self.admin()
+        if not base.supprimer_utilisateur(int(uid)):
+            raise Erreur(404, "Compte introuvable (l'admin ne peut pas être supprimé).")
+        self.repondre({"ok": True})
+
     # ---------- Livres ----------
     def lire_livre(self, lid):
-        l = base.livre(self.compte()["id"], int(lid))
+        moi = self.compte()
+        l = base.livre(self.cible(), int(lid))
         if not l:
             raise Erreur(404, "Livre introuvable.")
+        # L'admin peut écouter le livre de quelqu'un d'autre sans toucher à sa progression ni à ses stats
+        l["lecture_seule"] = l["utilisateur"] != moi["id"]
         self.repondre(l)
 
     def importer(self):
@@ -221,7 +261,25 @@ class Gestionnaire(SimpleHTTPRequestHandler):
             raise Erreur(422, "Aucun texte trouvé : ce PDF est probablement une image scannée.")
         titre = unquote(self.headers.get("X-Nom", "")).strip()
         titre = re.sub(r"\.pdf$", "", titre, flags=re.I)[:200] or "Sans titre"
-        self.repondre({"id": base.ajouter_livre(uid, titre, paras, pdf)}, code=201)
+        lid = base.ajouter_livre(uid, titre, paras, pdf, audio=travaux.actif())
+        travaux.nouveau_livre()
+        self.repondre({"id": lid}, code=201)
+
+    def couverture(self, lid):
+        image = self.corps(MAX_IMAGE)
+        format_ = next((f for debut, f in IMAGES.items() if image.startswith(debut)), None)
+        if image[:4] == b"RIFF" and image[8:12] == b"WEBP":
+            format_ = ("webp", "image/webp")
+        if not format_:
+            raise Erreur(415, "Image JPEG, PNG ou WebP uniquement.")
+        if not base.definir_couverture(self.cible(), int(lid), image, format_[0]):
+            raise Erreur(404, "Livre introuvable.")
+        self.repondre({"ok": True})
+
+    def retirer_couverture(self, lid):
+        if not base.definir_couverture(self.cible(), int(lid), None, None):
+            raise Erreur(404, "Livre introuvable.")
+        self.repondre({"ok": True})
 
     def progression(self, lid):
         uid = self.compte()["id"]
@@ -248,7 +306,7 @@ class Gestionnaire(SimpleHTTPRequestHandler):
         self.repondre(base.stats(None if cible == "tous" else int(cible)))
 
     def supprimer(self, lid):
-        base.supprimer_livre(self.compte()["id"], int(lid))
+        base.supprimer_livre(self.cible(), int(lid))
         self.repondre({"ok": True})
 
     def tts(self):
@@ -261,6 +319,56 @@ class Gestionnaire(SimpleHTTPRequestHandler):
         except Exception:  # Google injoignable ou limite atteinte
             raise Erreur(502, "La voix Google ne répond pas.")
 
+    # ---------- Admin : livres audio, srv-02, voix ----------
+    def admin_audio(self, lid):
+        self.admin()
+        action = self.json_recu().get("action")
+        if action not in ACTIONS_AUDIO:
+            raise Erreur(400)
+        if not base.livre(None, int(lid)):
+            raise Erreur(404, "Livre introuvable.")
+        if action in ("relancer", "supprimer"):
+            base.definir_audio(int(lid), None)              # efface les fichiers déjà générés
+        base.definir_audio(int(lid), {"generer": "attente", "relancer": "attente", "pause": "pause"}.get(action))
+        self.repondre({"ok": True})
+
+    def admin_srv02(self):
+        self.admin()
+        action = self.json_recu().get("action")
+        try:
+            if action == "reveiller":
+                travaux.reveiller_manuel()
+            elif action == "eteindre":
+                travaux.eteindre_manuel()
+            else:
+                raise Erreur(400)
+        except (OSError, ValueError, RuntimeError) as e:
+            raise Erreur(502, f"srv-02 : {e}")
+        self.repondre({"ok": True})
+
+    def admin_voix(self):
+        self.admin()
+        d = self.json_recu()
+        instruct, seed = str(d.get("instruct", "")).strip(), str(d.get("seed", "")).strip()
+        if not 0 < len(instruct) <= 200 or not seed.isdigit():
+            raise Erreur(400, "Description de voix (200 caractères max.) et graine (nombre) requises.")
+        base.definir_reglage("voix_instruct", instruct)
+        base.definir_reglage("voix_seed", seed)
+        self.repondre({"ok": True})
+
+    def admin_essai(self):
+        self.admin()
+        texte = str(self.json_recu().get("texte", "")).strip()[:300]
+        if not texte:
+            raise Erreur(400)
+        if not travaux.actif() or not travaux.voicestudio_pret():
+            raise Erreur(503, "VoiceStudio ne répond pas : réveille srv-02 d'abord.")
+        try:
+            audio, extension = travaux.synthese_ia(texte)
+        except Exception as e:
+            raise Erreur(502, f"VoiceStudio : {e}")
+        self.repondre(audio, TYPES[extension])
+
 
 if __name__ == "__main__":
     import sys
@@ -272,5 +380,6 @@ if __name__ == "__main__":
             sys.exit("Identifiant ou mot de passe invalide.")
         base.promouvoir_admin(sys.argv[2], mdp)
         sys.exit(f"Admin « {sys.argv[2]} » prêt.")
-    print(f"Lecteur PDF prêt : http://127.0.0.1:{PORT}")
+    travaux.demarrer()
+    print(f"Lecteur PDF prêt : http://127.0.0.1:{PORT}" + ("" if travaux.actif() else " (livres audio désactivés : VOICESTUDIO_CLE absente)"))
     ThreadingHTTPServer(("127.0.0.1", PORT), Gestionnaire).serve_forever()
