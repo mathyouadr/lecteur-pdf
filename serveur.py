@@ -38,6 +38,12 @@ ACTIONS_AUDIO = ("generer", "pause", "relancer", "supprimer")
 COUVERTURES_EN_LIGNE = os.environ.get("COUVERTURES_EN_LIGNE", "1") == "1"
 OPENLIBRARY = "https://openlibrary.org"
 OPENLIBRARY_COUVERTURES = "https://covers.openlibrary.org"
+
+# Écoutes en cours, pour l'onglet « En direct » du panel : (compte, livre) -> dernière activité.
+# Arrêts demandés par l'admin : (compte, livre) -> instant jusqu'auquel l'audio est refusé (la lecture s'arrête).
+# ponytail: en mémoire, remis à zéro au redémarrage ; suffit pour quelques auditeurs simultanés
+ECOUTES, ARRETS, verrou_ecoutes = {}, {}, threading.Lock()
+ECOUTE_ACTIVE = 45   # secondes sans signe de vie avant qu'une écoute ne soit plus affichée
 SECURE = "; Secure" if os.environ.get("LECTEUR_HTTPS") == "1" else ""
 IDENTIFIANT = re.compile(r"[\w.-]{3,32}")
 
@@ -208,6 +214,7 @@ class Gestionnaire(SimpleHTTPRequestHandler):
             (r"/api/voix", self.catalogue),
             (r"/api/voix/(\d+)/demo", lambda vid: self.compte() and self.fichier(base.fichier_demo(int(vid)))),
             (r"/api/admin/srv02", lambda: self.repondre(travaux.etat_public() if self.admin() else {})),
+            (r"/api/admin/activite", self.admin_activite),
             (r"/api/admin/voix", lambda: self.repondre(base.liste_voix() if self.admin() else [])),
             (r"/api/stats", self.stats),
             (r"/api/admin/stats", lambda: self.repondre(base.stats_par_utilisateur() if self.admin() else [])),
@@ -227,6 +234,7 @@ class Gestionnaire(SimpleHTTPRequestHandler):
             (r"/api/admin/livres/(\d+)/audio", self.admin_audio),
             (r"/api/admin/livres/(\d+)/progression", self.admin_reinitialiser),
             (r"/api/admin/srv02", self.admin_srv02),
+            (r"/api/admin/ecoutes/arreter", self.admin_arreter_ecoute),
             (r"/api/admin/voix", self.admin_ajouter_voix),
             (r"/api/admin/voix/essai", self.admin_essai),
             (r"/api/tts", self.tts),
@@ -373,6 +381,7 @@ class Gestionnaire(SimpleHTTPRequestHandler):
         except (KeyError, ValueError, TypeError):
             raise Erreur(400)
         base.sauver_progression(uid, int(lid), max(0, phrase), max(0, total), min(max(vitesse, 0.5), 5))
+        self.noter_ecoute(int(lid), phrase=max(0, phrase))
         # Plafonds : le lecteur envoie à chaque phrase, un envoi ne peut pas couvrir plus de 15 min
         secondes, lues = min(max(secondes, 0), 900), min(max(lues, 0), 500)
         if secondes > 0 or lues > 0:
@@ -394,9 +403,13 @@ class Gestionnaire(SimpleHTTPRequestHandler):
 
     def tts(self):
         self.compte()
-        texte = str(self.json_recu().get("texte", ""))[:2000]
+        d = self.json_recu()
+        texte = str(d.get("texte", ""))[:2000]
         if not texte.strip():
             raise Erreur(400)
+        if isinstance(d.get("livre"), int):
+            self.verifier_arret(d["livre"])
+            self.noter_ecoute(d["livre"], voix="google")
         try:
             self.repondre(synthese(texte), "audio/mpeg")
         except Exception:  # Google injoignable ou limite atteinte
@@ -417,7 +430,26 @@ class Gestionnaire(SimpleHTTPRequestHandler):
         lid, n = int(lid), int(n)
         if not base.livre_visible(self.cible(), lid):
             raise Erreur(404, "Introuvable.")
-        self.fichier(base.fichier_audio(None, lid, n) or travaux.phrase_a_la_demande(lid, n))
+        self.verifier_arret(lid)
+        fichier = base.fichier_audio(None, lid, n) or travaux.phrase_a_la_demande(lid, n)
+        if fichier:
+            self.noter_ecoute(lid, voix="ia")
+        self.fichier(fichier)
+
+    # ---------- Écoutes en cours ----------
+    def noter_ecoute(self, lid, phrase=None, voix=None):
+        c = self.compte()
+        with verrou_ecoutes:
+            e = ECOUTES.setdefault((c["id"], lid), {"qui": c["identifiant"], "phrase": None, "voix": None})
+            e["vu"] = time.time()
+            if phrase is not None:
+                e["phrase"] = phrase
+            if voix:
+                e["voix"] = voix
+
+    def verifier_arret(self, lid):
+        if ARRETS.get((self.compte()["id"], lid), 0) > time.time():
+            raise Erreur(409, "Lecture arrêtée par l'administrateur.")
 
     # ---------- Livre audio demandé par la personne ----------
     def catalogue(self):
@@ -456,6 +488,35 @@ class Gestionnaire(SimpleHTTPRequestHandler):
                 base.definir_audio(int(lid), None)          # efface les fichiers déjà générés
             base.definir_audio(int(lid), "attente")
             travaux.nouvelle_demande()
+        self.repondre({"ok": True})
+
+    def admin_activite(self):
+        """Onglet « En direct » : ce que la GPU génère, la file d'attente, et qui écoute quoi."""
+        self.admin()
+        maintenant = time.time()
+        gen = travaux.etat.get("generation")
+        en_generation = None
+        if gen and (l := base.resume_livre(gen["livre"])):
+            duree = max(maintenant - gen["depuis"], 1)
+            en_generation = {**l, "phrase": gen["phrase"], "par_minute": round(gen["faites"] / duree * 60, 1)}
+        with verrou_ecoutes:
+            for cle in [k for k, e in ECOUTES.items() if maintenant - e["vu"] > ECOUTE_ACTIVE]:
+                del ECOUTES[cle]
+            ecoutes = [{"utilisateur": uid, "livre": lid, **e} for (uid, lid), e in ECOUTES.items()]
+        for e in ecoutes:
+            e.update({k: v for k, v in (base.resume_livre(e["livre"]) or {}).items() if k in ("titre", "total")})
+            e["il_y_a"] = round(maintenant - e.pop("vu"))
+        self.repondre({"generation": en_generation, "file": base.file_detaillee(), "ecoutes": ecoutes})
+
+    def admin_arreter_ecoute(self):
+        """Arrête l'écoute de quelqu'un : son lecteur se met en pause à la phrase suivante, avec un message."""
+        self.admin()
+        d = self.json_recu()
+        if not isinstance(d.get("utilisateur"), int) or not isinstance(d.get("livre"), int):
+            raise Erreur(400)
+        with verrou_ecoutes:
+            ARRETS[(d["utilisateur"], d["livre"])] = time.time() + 15
+            ECOUTES.pop((d["utilisateur"], d["livre"]), None)
         self.repondre({"ok": True})
 
     def admin_srv02(self):

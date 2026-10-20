@@ -347,6 +347,34 @@ assert "écoute" in json.loads(appel("/api/admin/srv02", cookie=admin)[1])["mess
 file.join(timeout=10)
 assert base.etat_audio(lid_long) == "pret" and len(recu) == avant + 8           # reprise après le délai
 travaux.PRIORITE_ECOUTE = 8
+
+# Onglet « En direct » : génération en cours, file d'attente, écoutes, et arrêt d'une écoute
+assert appel("/api/admin/activite", cookie=bob)[0] == 403
+assert travaux.etat["generation"] is None                                      # la file ne génère plus rien
+appel(f"/api/livres/{lid_long}/progression", {"phrase": 3, "total": 8, "vitesse": 1}, cookie=bob)
+assert appel(f"/api/livres/{lid_long}/audio/3", cookie=bob)[0] == 200
+act = json.loads(appel("/api/admin/activite", cookie=admin)[1])
+assert act["generation"] is None and act["file"] == []
+e = next(x for x in act["ecoutes"] if x["qui"] == "bob")
+assert (e["qui"], e["livre"], e["phrase"], e["voix"], e["titre"]) == ("bob", lid_long, 3, "ia", "Long.pdf".removesuffix(".pdf"))
+assert appel("/api/admin/ecoutes/arreter", {"utilisateur": proprio_long, "livre": lid_long}, cookie=bob)[0] == 403
+assert appel("/api/admin/ecoutes/arreter", {"utilisateur": "x", "livre": lid_long}, cookie=admin)[0] == 400
+assert appel("/api/admin/ecoutes/arreter", {"utilisateur": proprio_long, "livre": lid_long}, cookie=admin)[0] == 200
+code, corps, _ = appel(f"/api/livres/{lid_long}/audio/3", cookie=bob)
+assert code == 409 and "arrêtée" in json.loads(corps)["erreur"]                 # le lecteur se met en pause
+assert appel("/api/tts", {"texte": "x", "livre": lid_long}, cookie=bob)[0] == 409
+assert appel(f"/api/livres/{lid_long}/audio/3", cookie=admin)[0] == 200         # seule son écoute est arrêtée
+assert all(x["qui"] != "bob" for x in json.loads(appel("/api/admin/activite", cookie=admin)[1])["ecoutes"])
+serveur.ARRETS.clear()
+
+# L'admin lance lui-même le livre audio d'un livre qui n'en a pas, avec la voix de son choix
+code, corps, _ = appel("/api/livres", cookie=bob, brut=long.tobytes(), entetes={"Content-Type": "application/pdf", "X-Nom": "Sans audio.pdf"})
+lid_sans = json.loads(corps)["id"]
+assert base.etat_audio(lid_sans) is None
+assert appel(f"/api/livres/{lid_sans}/audio", {"voix": v2}, cookie=admin)[0] == 200
+file = json.loads(appel("/api/admin/activite", cookie=admin)[1])["file"]
+assert [(l["id"], l["audio_etat"], l["voix"], l["identifiant"]) for l in file] == [(lid_sans, "attente", v2, "bob")]
+assert appel(f"/api/livres/{lid_sans}/audio", cookie=admin, methode="DELETE")[0] == 200
 faux.shutdown()
 
 # srv-02 éteint : pas d'audio IA à la demande, réponse rapide pour que le lecteur passe vite sur Google

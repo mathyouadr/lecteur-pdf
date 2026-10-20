@@ -267,6 +267,9 @@ body.lecteur { padding-bottom: 120px; }
 .actions-ligne { text-align: right; display: flex; gap: 6px; justify-content: flex-end; }
 .actions-ligne .menu-btn { background: var(--verre); color: var(--texte); }
 .alerte { color: var(--danger); }
+.rang { flex: none; width: 26px; text-align: center; font: 600 18px var(--titre); color: var(--doux); }
+.ligne.direct { border-color: rgba(240, 138, 75, .45); }
+.ligne .qui .prog { margin-top: 10px; max-width: 420px; border-radius: 2px; }
 .voix-admin { display: grid; gap: 8px; }
 .voix-admin .carte-voix { cursor: default; }
 .formulaire-voix { display: grid; grid-template-columns: 1fr 2fr 110px; gap: 4px 12px; align-items: end; padding: 18px 20px; border-radius: 18px; background: var(--verre); border: 1px solid var(--bord); }

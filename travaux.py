@@ -44,7 +44,8 @@ ESSAIS_PAR_PHRASE = 3
 # eteint_manuel : éteint depuis le panel, la file ne le rallume pas avant le prochain import ou un réveil manuel
 # ecoute_vue : dernière génération à la demande pour quelqu'un qui écoute ; la file lui laisse la GPU
 etat = {"message": "", "reveil_auto": False, "manuel": False, "eteint_manuel": False,
-        "inactif_depuis": None, "reveil_envoye": 0.0, "vs_ok": False, "vs_vu": 0.0, "ecoute_vue": 0.0}
+        "inactif_depuis": None, "reveil_envoye": 0.0, "vs_ok": False, "vs_vu": 0.0, "ecoute_vue": 0.0,
+        "generation": None}          # livre et phrase que la file génère en ce moment (panel « En direct »)
 PRIORITE_ECOUTE = 8   # secondes sans demande de l'auditeur avant que la file reprenne la GPU
 verrou = threading.Lock()
 en_generation = set()          # (livre, phrase) en cours de génération, par la file ou à la demande du lecteur
@@ -231,7 +232,8 @@ def _generer(lid, v):
     for n in base.phrases_generees(lid):
         if n < len(faites):
             faites[n] = True
-    compte = 0
+    compte, debut = 0, time.time()
+    etat["generation"] = {"livre": lid, "phrase": None, "faites": 0, "depuis": debut}
     while True:
         _ceder_a_l_ecoute(lid)
         if base.etat_audio(lid) != "encours":       # mis en pause, annulé ou livre supprimé pendant ce temps
@@ -245,6 +247,7 @@ def _generer(lid, v):
                 faites[m] = False
             continue
         faites[n] = True
+        etat["generation"] = {"livre": lid, "phrase": n, "faites": compte, "depuis": debut}
         for essai in range(ESSAIS_PAR_PHRASE):
             try:
                 generer_phrase(lid, n, phrases[n], v)
@@ -295,7 +298,10 @@ def _tour():
         base.definir_audio(travail["id"], "erreur", "Cette voix n'existe plus : choisis-en une autre.")
         return True
     base.definir_audio(travail["id"], "encours")
-    fin = _generer(travail["id"], v)
+    try:
+        fin = _generer(travail["id"], v)
+    finally:
+        etat["generation"] = None                    # plus rien en cours sur la GPU pour la file
     if fin is None:
         return False
     if fin == "pret":

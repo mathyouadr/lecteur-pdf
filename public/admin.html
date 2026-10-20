@@ -19,6 +19,7 @@
   <h1>Administration</h1>
   <nav class="onglets-admin" role="tablist" aria-label="Sections">
     <button role="tab" data-onglet="apercu" aria-selected="true">Vue d'ensemble</button>
+    <button role="tab" data-onglet="direct" aria-selected="false">En direct <span class="compteur" id="nb-direct" hidden></span></button>
     <button role="tab" data-onglet="comptes" aria-selected="false">Comptes <span class="compteur" id="nb-attente" hidden></span></button>
     <button role="tab" data-onglet="livres" aria-selected="false">Livres</button>
     <button role="tab" data-onglet="voix" aria-selected="false">Voix</button>
@@ -38,6 +39,17 @@
     <div class="tuiles" id="chiffres"></div>
     <h2>À traiter</h2>
     <div id="a-traiter"></div>
+  </section>
+
+  <!-- En direct -->
+  <section id="direct" role="tabpanel" hidden>
+    <h2>En génération</h2>
+    <div id="direct-generation"></div>
+    <h2>File d'attente</h2>
+    <div id="direct-file"></div>
+    <h2>En écoute</h2>
+    <div id="direct-ecoutes"></div>
+    <p class="discret">Mis à jour toutes les 5 secondes.</p>
   </section>
 
   <!-- Comptes -->
@@ -105,9 +117,10 @@ function ouvrirOnglet(nom) {
     $(b.dataset.onglet).hidden = b.dataset.onglet !== nom;
   }
   history.replaceState(null, "", `#${nom}`);
+  if (nom === "direct" && livres.length + comptes.length) chargerDirect();   // rafraîchi toutes les 5 s tant qu'il est ouvert
 }
 document.querySelectorAll("[data-onglet]").forEach(b => b.onclick = () => ouvrirOnglet(b.dataset.onglet));
-if (["comptes", "livres", "voix"].includes(location.hash.slice(1))) ouvrirOnglet(location.hash.slice(1));
+if (["direct", "comptes", "livres", "voix"].includes(location.hash.slice(1))) ouvrirOnglet(location.hash.slice(1));
 
 // ---------- srv-02 ----------
 let minuterie = null;
@@ -181,6 +194,74 @@ function bouton(texte, classe, quand) {
   return b;
 }
 
+// ---------- En direct ----------
+const ETATS = { encours: "En cours", attente: "En attente", pause: "En pause" };
+let suiviDirect = null;
+
+function vide(texte) { return el("p", "discret", texte); }
+
+async function chargerDirect() {
+  clearTimeout(suiviDirect);
+  let a;
+  try { a = await api("/api/admin/activite"); } catch (err) { return toast(err.message, true); }
+  const noms = voixParId();
+  const g = a.generation;
+  if (g) {
+    const d = el("div", "ligne direct");
+    const qui = el("div", "qui", g.titre);
+    qui.append(el("span", "pastille", g.identifiant));
+    const details = [g.phrase !== null ? `phrase ${g.phrase + 1} sur ${g.total}` : "démarrage", `${g.audio_faits} prêtes`];
+    if (g.par_minute) details.push(`${String(g.par_minute).replace(".", ",")} phrases par minute`);
+    if (noms[g.voix]) details.push(`voix « ${noms[g.voix]} »`);
+    qui.append(el("small", "", details.join(", ")), barre(g.total ? g.audio_faits / g.total : 0));
+    d.append(qui, bouton("Pause", "", () => action(api(`/api/admin/livres/${g.id}/audio`, envoi({ action: "pause" })), "Livre audio en pause.")),
+             bouton("Arrêter et supprimer", "danger", () => {
+               if (confirm(`Arrêter la génération et supprimer le livre audio de « ${g.titre} » ?`)) {
+                 action(api(`/api/admin/livres/${g.id}/audio`, envoi({ action: "supprimer" })), "Génération arrêtée, livre audio supprimé.");
+               }
+             }));
+    $("direct-generation").replaceChildren(d);
+  } else {
+    $("direct-generation").replaceChildren(vide(srv02.voicestudio ? "La GPU ne génère rien en ce moment." : "Rien en génération : srv-02 est éteint ou la file est vide."));
+  }
+  const file = a.file.filter(l => !g || l.id !== g.id);
+  $("direct-file").replaceChildren(...(file.length ? file.map((l, i) => {
+    const d = el("div", "ligne");
+    const qui = el("div", "qui", l.titre);
+    qui.append(el("span", "pastille", l.identifiant));
+    qui.append(el("small", "", `${ETATS[l.audio_etat]}, ${l.total ? Math.floor((l.audio_faits / l.total) * 100) : 0} % prêt${noms[l.voix] ? `, voix « ${noms[l.voix]} »` : ""}`));
+    const rang = el("span", "rang", l.audio_etat === "pause" ? "—" : String(i + 1));
+    d.append(rang, qui);
+    if (l.audio_etat === "pause") d.append(bouton("Reprendre", "ok", () => action(api(`/api/admin/livres/${l.id}/audio`, envoi({ action: "generer" })), "Remis dans la file.")));
+    else d.append(bouton("Pause", "", () => action(api(`/api/admin/livres/${l.id}/audio`, envoi({ action: "pause" })), "Livre audio en pause.")));
+    d.append(bouton("Retirer", "danger", () => {
+      if (confirm(`Retirer « ${l.titre} » de la file et supprimer ce qui est déjà généré ?`)) {
+        action(api(`/api/admin/livres/${l.id}/audio`, envoi({ action: "supprimer" })), "Retiré de la file.");
+      }
+    }));
+    return d;
+  }) : [vide("Aucun livre en attente.")]));
+  $("direct-ecoutes").replaceChildren(...(a.ecoutes.length ? a.ecoutes.map(e => {
+    const d = el("div", "ligne");
+    const qui = el("div", "qui", `${e.qui} écoute « ${e.titre || "livre supprimé"} »`);
+    const details = [];
+    if (e.phrase !== null && e.total) details.push(`phrase ${e.phrase + 1} sur ${e.total}`);
+    if (e.voix) details.push(e.voix === "ia" ? "voix IA" : "voix Google");
+    details.push(e.il_y_a < 5 ? "à l'instant" : `il y a ${e.il_y_a} s`);
+    qui.append(el("small", "", details.join(", ")));
+    d.append(qui, bouton("Arrêter l'écoute", "danger", () => {
+      if (confirm(`Arrêter l'écoute de ${e.qui} ? Sa lecture se mettra en pause avec un message.`)) {
+        action(api("/api/admin/ecoutes/arreter", envoi({ utilisateur: e.utilisateur, livre: e.livre })), `Écoute de ${e.qui} arrêtée.`);
+      }
+    }));
+    return d;
+  }) : [vide("Personne n'écoute en ce moment.")]));
+  const actifs = a.file.filter(l => l.audio_etat !== "pause").length + a.ecoutes.length;
+  $("nb-direct").hidden = !actifs;
+  $("nb-direct").textContent = actifs;
+  suiviDirect = setTimeout(chargerDirect, $("direct").hidden ? 15000 : 5000);
+}
+
 // ---------- Comptes ----------
 function afficherComptes() {
   $("liste-comptes").replaceChildren(...comptes.map(c => {
@@ -252,6 +333,15 @@ function menuLivre(l) {
   const audio = (act, msg) => async () => action(api(`/api/admin/livres/${l.id}/audio`, envoi({ action: act })), msg);
   const actions = [{ texte: "Ouvrir en lecture seule", aide: "Sa progression et ses stats ne bougent pas",
                      faire: async () => { location.href = `/lecteur.html?livre=${l.id}`; } }];
+  if (srv02.configure && voix.length) {
+    actions.push({ texte: l.audio_etat ? "Changer la voix du livre audio" : "Créer le livre audio",
+                   aide: l.audio_etat ? "Refait tout le livre avec la voix choisie" : "Choisir la voix, puis la génération démarre",
+                   faire: async () => menuActions(l.titre, "Avec quelle voix ?", voix.map(v => ({
+                     texte: v.nom + (v.id === l.voix ? " (voix actuelle)" : ""), aide: `${v.instruct}, graine ${v.seed}`,
+                     question: l.audio_etat && v.id !== l.voix ? "Changer de voix refait tout le livre audio. Continuer ?" : undefined,
+                     faire: async () => action(api(`/api/livres/${l.id}/audio`, envoi({ voix: v.id })), `Livre audio lancé avec la voix « ${v.nom} ».`),
+                   }))) });
+  }
   if (["attente", "encours"].includes(l.audio_etat)) actions.push({ texte: "Mettre le livre audio en pause", faire: audio("pause", "Livre audio en pause.") });
   if (["pause", "erreur"].includes(l.audio_etat)) actions.push({ texte: "Reprendre le livre audio", faire: audio("generer", "Génération reprise.") });
   if (l.audio_etat && l.voix) actions.push({ texte: "Refaire le livre audio", aide: "Avec la même voix, depuis le début",
@@ -321,7 +411,8 @@ async function charger() {
   afficherComptes();
   afficherLivres();
   afficherVoix();
-  chargerSrv02();
+  chargerSrv02();      // peut prendre 3 s quand srv-02 dort : on ne l'attend pas
+  chargerDirect();
 }
 
 charger();

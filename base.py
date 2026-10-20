@@ -468,6 +468,20 @@ def prochain_travail():
     return lignes[0] if lignes else None
 
 
+def resume_livre(lid):
+    lignes, _ = _sql("""SELECT l.id, l.titre, l.total, l.audio_faits, l.voix, u.identifiant
+                        FROM livres l JOIN utilisateurs u ON u.id = l.utilisateur WHERE l.id = ?""", (lid,))
+    return lignes[0] if lignes else None
+
+
+def file_detaillee():
+    """Livres audio en cours, en attente (dans l'ordre où la file les prendra), puis en pause."""
+    return _sql("""SELECT l.id, l.titre, l.total, l.audio_faits, l.audio_etat, l.voix, u.identifiant
+                   FROM livres l JOIN utilisateurs u ON u.id = l.utilisateur
+                   WHERE l.audio_etat IN ('encours', 'attente', 'pause')
+                   ORDER BY l.audio_etat = 'encours' DESC, l.audio_etat = 'pause', l.id""")[0]
+
+
 def etat_audio(lid):
     lignes, _ = _sql("SELECT audio_etat FROM livres WHERE id = ?", (lid,))
     return lignes[0]["audio_etat"] if lignes else None

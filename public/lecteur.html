@@ -189,7 +189,7 @@ function son(i) {
         if (carte[i] === "0") carte = carte.slice(0, i) + "1" + carte.slice(i + 1);
         return { url: URL.createObjectURL(await r.blob()), ia: true };
       }
-      const b = await api("/api/tts", envoi({ texte: phrases[i].textContent }));
+      const b = await api("/api/tts", envoi({ texte: phrases[i].textContent, livre: idLivre }));
       return { url: URL.createObjectURL(b), ia: false };
     })());
   }
