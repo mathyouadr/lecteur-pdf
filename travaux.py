@@ -1,7 +1,8 @@
 """Génération des livres audio en tâche de fond, avec VoiceStudio sur srv-02.
 
-Une seule file, traitée livre par livre : on réveille srv-02 (Wake-on-LAN) si VoiceStudio ne répond pas,
-on génère une phrase à la fois (en commençant là où la personne en est), et chaque fichier est rangé
+Une seule file, traitée livre par livre, avec la voix que la personne a choisie dans le catalogue :
+on réveille srv-02 (Wake-on-LAN) si VoiceStudio ne répond pas, on génère une phrase à la fois
+(en commençant là où la personne en est), et chaque fichier est rangé
 sur ce serveur : le livre audio reste écoutable quand srv-02 est éteint. Si c'est la file qui a réveillé
 srv-02, on l'éteint 10 minutes après la fin du travail (jamais s'il a été allumé à la main).
 
@@ -33,7 +34,8 @@ PVE_NOEUD = os.environ.get("PVE_NOEUD", "srv-02")
 PVE_JETON = os.environ.get("PVE_JETON", "")       # « utilisateur@pve!nom=secret »
 PVE_CA = os.environ.get("PVE_CA", "")             # certificat de l'autorité du cluster (pve-root-ca.pem)
 
-VOIX_DEFAUT = {"instruct": "male, middle-aged, low pitch", "seed": "42"}
+TEXTE_DEMO = ("C'était une belle et froide journée d'avril, et les horloges sonnaient treize heures. "
+              "Voici la voix qui lira ton livre.")
 ATTENTE_DEMARRAGE = 15 * 60   # au-delà, on signale que srv-02 ne répond pas (mais on continue d'essayer)
 DELAI_EXTINCTION = 10 * 60
 ESSAIS_PAR_PHRASE = 3
@@ -98,8 +100,8 @@ def eteindre_manuel():
         etat.update(manuel=False, reveil_auto=False, eteint_manuel=True, inactif_depuis=None)
 
 
-def nouveau_livre():
-    """Un livre vient d'être importé : la file a de nouveau le droit de réveiller srv-02."""
+def nouvelle_demande():
+    """Quelqu'un vient de demander un livre audio : la file a de nouveau le droit de réveiller srv-02."""
     etat["eteint_manuel"] = False
 
 
@@ -110,10 +112,6 @@ def etat_public():
 
 
 # ---------- Voix ----------
-def voix():
-    return {cle: base.reglage(f"voix_{cle}", defaut) for cle, defaut in VOIX_DEFAUT.items()}
-
-
 def _multipart(champs):
     borne = uuid.uuid4().hex
     corps = b"".join(f'--{borne}\r\nContent-Disposition: form-data; name="{k}"\r\n\r\n{v}\r\n'.encode()
@@ -121,9 +119,9 @@ def _multipart(champs):
     return corps + f"--{borne}--\r\n".encode(), f"multipart/form-data; boundary={borne}"
 
 
-def synthese_ia(texte):
-    """Une phrase en voix IA. Renvoie (octets, extension) : MP3 si ffmpeg est installé, sinon le WAV brut."""
-    v = voix()
+def synthese_ia(texte, v):
+    """Une phrase avec la voix v (instruct, seed). Renvoie (octets, extension) : MP3 si ffmpeg est installé,
+    sinon le WAV brut."""
     corps, type_ = _multipart({"text": texte, "language": "French", "instruct": v["instruct"], "seed": v["seed"]})
     req = urllib.request.Request(f"{VOICESTUDIO_URL}/generate", data=corps, method="POST",
                                  headers={"Content-Type": type_, "Authorization": f"Bearer {VOICESTUDIO_CLE}"})
@@ -159,7 +157,7 @@ def _attendre_srv02():
     return False
 
 
-def _generer(lid, depart):
+def _generer(lid, depart, v):
     """Génère les phrases manquantes, en commençant à « depart ». Renvoie l'état final, ou None pour réessayer."""
     phrases = base.phrases_a_plat(lid)
     ordre = list(range(min(depart, len(phrases)), len(phrases))) + list(range(min(depart, len(phrases))))
@@ -170,7 +168,7 @@ def _generer(lid, depart):
             continue
         for essai in range(ESSAIS_PAR_PHRASE):
             try:
-                base.ecrire_audio(lid, n, *synthese_ia(phrases[n][:2000]))
+                base.ecrire_audio(lid, n, *synthese_ia(phrases[n][:2000], v))
                 break
             except (OSError, subprocess.CalledProcessError, ValueError) as e:
                 if not voicestudio_pret():
@@ -183,7 +181,19 @@ def _generer(lid, depart):
     return "pret"
 
 
+def _demos():
+    """Démos manquantes du catalogue, générées dès que VoiceStudio répond (sans réveiller srv-02 pour ça)."""
+    manquantes = base.voix_sans_demo()
+    if manquantes and voicestudio_pret():
+        for v in manquantes:
+            try:
+                base.definir_demo(v["id"], *synthese_ia(TEXTE_DEMO, v))
+            except (OSError, subprocess.CalledProcessError) as e:
+                etat["message"] = f"Démo de la voix « {v['nom']} » impossible : {e}"
+
+
 def _tour():
+    _demos()
     travail = base.prochain_travail()
     if not travail:
         with verrou:
@@ -201,8 +211,12 @@ def _tour():
     if not _attendre_srv02():
         return False
     etat["message"] = ""
+    v = base.voix(travail["voix"])
+    if not v:
+        base.definir_audio(travail["id"], "erreur", "Cette voix n'existe plus : choisis-en une autre.")
+        return True
     base.definir_audio(travail["id"], "encours")
-    fin = _generer(travail["id"], travail["phrase"])
+    fin = _generer(travail["id"], travail["phrase"], v)
     if fin is None:
         return False
     if fin == "pret":

@@ -26,18 +26,22 @@
     <button id="eteindre" class="non">Éteindre</button>
   </div>
 
-  <h2>Voix IA</h2>
+  <h2>Catalogue de voix</h2>
+  <p class="discret">Les utilisateurs choisissent leur voix dans cette liste, après avoir écouté sa démo.
+    Ajouter une voix génère sa démo tout de suite : srv-02 doit être allumé.</p>
+  <div id="voix"></div>
   <div class="ligne">
     <div class="qui">
-      <small>Une seule voix pour tous les livres audio. La changer ne touche pas aux livres déjà générés (utilise « Relancer » pour les refaire).</small>
-      <div class="reglage" style="margin-top:10px">
+      <div class="reglage">
+        <input id="voix-nom" maxlength="60" aria-label="Nom de la voix" placeholder="Nom (ex. Homme grave)">
         <input id="instruct" maxlength="200" aria-label="Description de la voix" placeholder="male, middle-aged, low pitch">
         <input id="seed" class="court" inputmode="numeric" aria-label="Graine" placeholder="42">
-        <button id="enregistrer-voix">Enregistrer</button>
       </div>
+      <small>Description en anglais : male / female, child / teenager / young adult / middle-aged / elderly,
+        very low / low / high / very high pitch, whisper. La graine fixe le timbre.</small>
       <div class="reglage" style="margin-top:10px">
-        <input id="essai-texte" maxlength="300" aria-label="Texte d'essai" value="C'était une belle et froide journée d'avril, les horloges affichaient treize heures.">
         <button id="essai">Écouter un essai</button>
+        <button id="ajouter-voix" class="ok">Ajouter au catalogue</button>
       </div>
     </div>
   </div>
@@ -112,19 +116,38 @@ $("eteindre").onclick = () => {
   }
 };
 
-// ---------- Voix ----------
-api("/api/admin/voix").then(v => { $("instruct").value = v.instruct; $("seed").value = v.seed; }).catch(erreur);
-$("enregistrer-voix").onclick = () => action(api("/api/admin/voix", envoi({ instruct: $("instruct").value, seed: $("seed").value })));
-$("essai").onclick = async () => {
-  $("essai").disabled = true;
-  $("essai").textContent = "Génération…";
-  try {
-    const b = await api("/api/admin/voix/essai", envoi({ texte: $("essai-texte").value }));
-    new Audio(URL.createObjectURL(b)).play();
-  } catch (err) { erreur(err); }
-  $("essai").disabled = false;
-  $("essai").textContent = "Écouter un essai";
-};
+// ---------- Catalogue de voix ----------
+let voixParId = {};
+const reglagesVoix = () => ({ nom: $("voix-nom").value, instruct: $("instruct").value, seed: $("seed").value });
+
+function ligneVoix(v) {
+  const d = el("div", "ligne");
+  const qui = el("div", "qui", v.nom);
+  qui.append(el("small", "", `${v.instruct} · graine ${v.seed}`));
+  d.append(qui, bouton(v.demo ? "▶ Démo" : "Démo à générer", "", () => new Audio(`/api/voix/${v.id}/demo`).play()));
+  d.lastChild.disabled = !v.demo;
+  d.append(bouton("Supprimer", "non", () => {
+    if (confirm(`Retirer la voix « ${v.nom} » du catalogue ?`)) action(api(`/api/admin/voix/${v.id}`, { method: "DELETE" }));
+  }));
+  return d;
+}
+
+async function patienter(b, texte, travail) {
+  const avant = b.textContent;
+  b.disabled = true;
+  b.textContent = texte;
+  try { await travail(); $("message").textContent = ""; } catch (err) { erreur(err); }
+  b.disabled = false;
+  b.textContent = avant;
+}
+$("essai").onclick = () => patienter($("essai"), "Génération…", async () => {
+  new Audio(URL.createObjectURL(await api("/api/admin/voix/essai", envoi(reglagesVoix())))).play();
+});
+$("ajouter-voix").onclick = () => patienter($("ajouter-voix"), "Création de la démo…", async () => {
+  await api("/api/admin/voix", envoi(reglagesVoix()));
+  $("voix-nom").value = "";
+  charger();
+});
 
 // ---------- Comptes ----------
 function ligneCompte(c) {
@@ -147,7 +170,6 @@ function ligneCompte(c) {
 
 // ---------- Livres de tout le monde ----------
 const AUDIO = {   // actions proposées selon l'état du livre audio : [texte, action, classe, confirmation]
-  null: [["Générer l'audio", "generer", "ok"]],
   attente: [["Pause", "pause"]],
   encours: [["Pause", "pause"]],
   pause: [["Reprendre", "generer", "ok"], ["Suppr. audio", "supprimer", "non", "Supprimer le livre audio déjà généré ?"]],
@@ -161,12 +183,14 @@ function ligneLivre(l) {
   c.classList.add("mini");
   const qui = el("div", "qui", l.titre);
   qui.append(el("span", "pastille", l.identifiant));
-  const infos = [`Lu à ${Math.round(pourcent(l) * 100)} %`, texteAudio(l) || "Pas de livre audio", octetsTexte(l.octets)];
+  const audio = texteAudio(l) ? `${texteAudio(l)} (${voixParId[l.voix] || "voix supprimée"})` : "Pas de livre audio";
+  const reste = Math.ceil(((l.lu_le || l.ajoute_le) + 30 * 86400 - Date.now() / 1000) / 86400);
+  const infos = [`Lu à ${Math.round(pourcent(l) * 100)} %`, audio, octetsTexte(l.octets), `suppression dans ${Math.max(reste, 0)} j`];
   qui.append(el("small", "", infos.join(" · ")));
   const ouvrir = el("a", "lien", "Ouvrir");
   ouvrir.href = `/lecteur.html?livre=${l.id}`;
   d.append(c, qui, ouvrir);
-  for (const [texte, act, classe, question] of AUDIO[l.audio_etat] || []) {
+  for (const [texte, act, classe, question] of (l.voix ? AUDIO[l.audio_etat] : []) || []) {
     d.append(bouton(texte, classe, () => {
       if (!question || confirm(question)) action(api(`/api/admin/livres/${l.id}/audio`, envoi({ action: act })));
     }));
@@ -185,8 +209,12 @@ function vide() {
 
 async function charger() {
   let comptes, livres;
-  try { [comptes, livres] = await Promise.all([api("/api/admin/utilisateurs"), api("/api/admin/livres")]); }
-  catch (err) { return erreur(err); }
+  let voix;
+  try {
+    [comptes, livres, voix] = await Promise.all([api("/api/admin/utilisateurs"), api("/api/admin/livres"), api("/api/admin/voix")]);
+  } catch (err) { return erreur(err); }
+  voixParId = Object.fromEntries(voix.map(v => [v.id, v.nom]));
+  $("voix").replaceChildren(...(voix.length ? voix.map(ligneVoix) : [el("div", "discret", "Aucune voix : les utilisateurs ne peuvent pas créer de livre audio.")]));
   for (const statut of Object.keys(ACTIONS)) {
     const liste = comptes.filter(c => c.statut === statut);
     $(statut).replaceChildren(...(liste.length ? liste.map(ligneCompte) : [vide()]));

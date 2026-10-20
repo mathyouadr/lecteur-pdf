@@ -2,7 +2,7 @@
 
 Un lecteur de PDF à voix haute, auto-hébergé. On importe ses livres en PDF, on clique sur une phrase, et la voix de Google Traduction (accent de France) lit la suite pendant que chaque phrase est surlignée. La lecture reprend là où on s'était arrêté, sur n'importe quel appareil.
 
-En option, chaque livre importé devient un **livre audio** à voix IA, généré par [VoiceStudio](https://github.com/debpalash/VoiceStudio) sur un serveur à carte graphique réveillé à la demande. La voix Google sert le temps que l'IA travaille, puis le lecteur passe tout seul sur la voix IA, phrase par phrase.
+En option, chacun peut transformer un livre en **livre audio** à voix IA, avec la voix de son choix, générée par [VoiceStudio](https://github.com/debpalash/VoiceStudio) sur un serveur à carte graphique réveillé à la demande. La voix Google sert le temps que l'IA travaille, puis le lecteur passe tout seul sur la voix IA, phrase par phrase.
 
 L'accès est fermé : chacun peut demander un compte, mais seul l'administrateur peut le valider.
 
@@ -11,11 +11,12 @@ L'accès est fermé : chacun peut demander un compte, mais seul l'administrateur
 ## Fonctionnalités
 
 - **Bibliothèque personnelle** : chaque compte a ses propres livres, avec une couverture générée à partir du titre (ou une image importée : JPEG, PNG ou WebP, 5 Mo maximum) et une barre de progression. Une carte « Reprendre la lecture » mène directement au dernier livre ouvert. Import par glisser-déposer, jusqu'à 50 Mo par PDF.
-- **Livres audio IA** (optionnel) : à l'import, le livre part dans une file de génération. Le serveur VoiceStudio est réveillé par Wake-on-LAN, chaque phrase est générée puis rangée ici, en commençant là où la personne en est. Le livre audio reste donc écoutable quand le serveur IA est éteint. Si c'est la file qui l'a réveillé, il est éteint 10 minutes après la fin du travail.
+- **Livres audio IA** (optionnel) : la personne écoute la démo de chaque voix du catalogue, en choisit une et lance la transformation (elle peut changer de voix, ce qui refait tout le livre, ou supprimer le livre audio). Le livre part dans une file de génération : le serveur VoiceStudio est réveillé par Wake-on-LAN, chaque phrase est générée puis rangée ici, en commençant là où la personne en est. Le livre audio reste donc écoutable quand le serveur IA est éteint. Si c'est la file qui l'a réveillé, il est éteint 10 minutes après la fin du travail.
+- **Durée de vie** : un livre (PDF, couverture, livre audio) est supprimé 1 mois après sa dernière écoute, sauf pendant sa génération. Sa position reste gardée jusqu'à 2 mois après cette dernière écoute : en réimportant le même PDF, la lecture reprend là où elle s'était arrêtée.
 - **Lecture à voix haute** : la phrase en cours est surlignée et suivie à l'écran. On clique sur n'importe quelle phrase pour lire à partir de là. Vitesse de 0,8× à 5×, sans changer la hauteur de la voix. Les deux phrases suivantes sont préparées à l'avance pour éviter les blancs.
 - **Progression enregistrée** : la phrase atteinte et la vitesse choisie sont sauvegardées pour chaque livre.
 - **Comptes validés par l'admin** : inscription libre, mais connexion impossible tant que l'admin n'a pas validé le compte. Une révocation déconnecte la personne immédiatement.
-- **Panel admin** : valider, révoquer ou supprimer un compte (avec ses livres et fichiers) ; voir et écouter les livres de chacun en lecture seule (sa progression et ses stats ne bougent pas) ; supprimer un livre ; piloter les livres audio (générer, pause, relancer, supprimer) ; choisir la voix IA et l'écouter ; réveiller ou éteindre le serveur IA ; voir la place prise sur le disque.
+- **Panel admin** : valider, révoquer ou supprimer un compte (avec ses livres et fichiers) ; voir et écouter les livres de chacun en lecture seule (sa progression et ses stats ne bougent pas) ; supprimer un livre ; piloter les livres audio (pause, reprendre, relancer, supprimer) ; gérer le catalogue de voix (essai, ajout avec sa démo, retrait) ; réveiller ou éteindre le serveur IA ; voir la place prise sur le disque.
 - **Statistiques** : temps d'écoute réel (pauses exclues), minutes par jour sur 30 jours, livres en cours et terminés, jours d'affilée, livres les plus écoutés. Chacun voit les siennes ; l'admin voit celles de tout le monde.
 - **Extraction propre du texte** : les paragraphes sont reconstitués, les mots coupés en fin de ligne recollés, les numéros de page supprimés et les ligatures (ﬁ, ﬃ) remplacées par les lettres correspondantes.
 
@@ -84,7 +85,7 @@ PrivateTmp=yes
 WantedBy=multi-user.target
 ```
 
-Toutes les données sont stockées dans `donnees/` : la base SQLite `lecteur.db`, les PDF importés dans `livres/`, les livres audio dans `audio/` (un MP3 par phrase, environ 250 Mo pour un roman de 11 h) et les couvertures dans `couvertures/`. Sauvegarder ce dossier suffit. La base est créée et mise à jour automatiquement au démarrage.
+Toutes les données sont stockées dans `donnees/` : la base SQLite `lecteur.db`, les PDF importés dans `livres/`, les livres audio dans `audio/` (un MP3 par phrase, environ 250 Mo pour un roman de 11 h), les couvertures dans `couvertures/` et les démos des voix dans `voix/`. Sauvegarder ce dossier suffit. La base est créée et mise à jour automatiquement au démarrage.
 
 ### Livres audio IA
 

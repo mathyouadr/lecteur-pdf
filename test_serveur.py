@@ -3,6 +3,7 @@ import json
 import sqlite3
 import tempfile
 import threading
+import time
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -25,7 +26,7 @@ assert phrases("etc. et ainsi de suite. Fin.") == ["etc. et ainsi de suite.", "F
 
 tmp = Path(tempfile.mkdtemp())
 base.DONNEES, base.BASE, base.LIVRES = tmp, tmp / "test.db", tmp / "livres"
-base.AUDIO, base.COUVERTURES = tmp / "audio", tmp / "couvertures"
+base.AUDIO, base.COUVERTURES, base.VOIX = tmp / "audio", tmp / "couvertures", tmp / "voix"
 base.initialiser()
 httpd = ThreadingHTTPServer(("127.0.0.1", 0), serveur.Gestionnaire)
 threading.Thread(target=httpd.serve_forever, daemon=True).start()
@@ -146,13 +147,14 @@ assert code == 200 and corps == b"RIFF....WAVE" and h["Content-Type"] == "audio/
 assert appel(f"/api/livres/{lid}/audio/0", cookie=bob)[0] == 404
 assert appel(f"/api/livres/{lid}/audio/0", cookie=admin)[0] == 200
 
-# Pilotage du livre audio par l'admin
-assert appel(f"/api/admin/livres/{lid}/audio", {"action": "generer"}, cookie=alice)[0] == 403
-assert appel(f"/api/admin/livres/{lid}/audio", {"action": "autre"}, cookie=admin)[0] == 400
-assert appel(f"/api/admin/livres/{lid}/audio", {"action": "pause"}, cookie=admin)[0] == 200
-assert base.etat_audio(lid) == "pause" and base.prochain_travail() is None
-assert appel(f"/api/admin/livres/{lid}/audio", {"action": "relancer"}, cookie=admin)[0] == 200
-assert base.etat_audio(lid) == "attente" and base.fichier_audio(None, lid, 0) is None   # relancer efface l'existant
+# Catalogue de voix : visible par tout compte connecté, sans les réglages internes
+cat = json.loads(appel("/api/voix", cookie=alice)[1])
+assert cat["actif"] is False and [v["nom"] for v in cat["voix"]] == [n for n, _, _ in base.VOIX_DEPART]
+assert not cat["voix"][0]["demo"] and "instruct" not in cat["voix"][0]
+v1, v2 = cat["voix"][0]["id"], cat["voix"][1]["id"]
+assert appel("/api/voix")[0] == 401
+assert base.etat_audio(lid) is None                                                  # rien n'est lancé à l'import
+assert appel(f"/api/livres/{lid}/audio", {"voix": v1}, cookie=alice)[0] == 503       # VoiceStudio pas configuré
 
 # File de génération, contre un faux VoiceStudio
 recu = []
@@ -179,25 +181,65 @@ faux = ThreadingHTTPServer(("127.0.0.1", 0), FauxVoiceStudio)
 threading.Thread(target=faux.serve_forever, daemon=True).start()
 travaux.VOICESTUDIO_URL, travaux.VOICESTUDIO_CLE = f"http://127.0.0.1:{faux.server_port}", "cle-test"
 travaux.shutil.which = lambda _: None      # pas de ffmpeg : les fichiers restent en WAV
-assert appel("/api/admin/voix", {"instruct": "female, young", "seed": "abc"}, cookie=admin)[0] == 400
-assert appel("/api/admin/voix", {"instruct": "female, young", "seed": "7"}, cookie=admin)[0] == 200
-assert json.loads(appel("/api/admin/voix", cookie=admin)[1]) == {"instruct": "female, young", "seed": "7"}
+
+# C'est la personne qui lance son livre audio, avec la voix de son choix
+assert appel(f"/api/livres/{lid}/audio", {"voix": 999}, cookie=alice)[0] == 404
+assert appel(f"/api/livres/{lid}/audio", {"voix": "1"}, cookie=alice)[0] == 404
+assert appel(f"/api/livres/{lid}/audio", {"voix": v1}, cookie=bob)[0] == 404
+assert appel(f"/api/livres/{lid}/audio", {"voix": v1}, cookie=alice)[0] == 200
+assert base.etat_audio(lid) == "attente" and base.fichier_audio(None, lid, 0) is None  # nouvelle voix : on repart de zéro
+
+# Pilotage du livre audio par l'admin
+assert appel(f"/api/admin/livres/{lid}/audio", {"action": "generer"}, cookie=alice)[0] == 403
+assert appel(f"/api/admin/livres/{lid}/audio", {"action": "autre"}, cookie=admin)[0] == 400
+assert appel(f"/api/admin/livres/{lid}/audio", {"action": "pause"}, cookie=admin)[0] == 200
+assert base.etat_audio(lid) == "pause" and base.prochain_travail() is None
+assert appel(f"/api/admin/livres/{lid}/audio", {"action": "generer"}, cookie=admin)[0] == 200
+assert base.etat_audio(lid) == "attente"
+
+# Un tour de file : d'abord les démos manquantes du catalogue, puis le livre, avec la voix choisie
 assert travaux._tour() is True
-assert base.etat_audio(lid) == "pret" and len(recu) == 2
-assert all(cle == "Bearer cle-test" and "female, young" in corps and "French" in corps for cle, corps in recu)
-assert any("Deuxième phrase ici." in corps for _, corps in recu)
+assert base.etat_audio(lid) == "pret" and len(recu) == len(base.VOIX_DEPART) + 2
+assert all(cle == "Bearer cle-test" and "French" in corps for cle, corps in recu)
+assert sum("Deuxième phrase ici." in c and base.VOIX_DEPART[0][1] in c for _, c in recu) == 1
+assert all(v["demo"] for v in json.loads(appel("/api/voix", cookie=alice)[1])["voix"])
+code, corps, h = appel(f"/api/voix/{v1}/demo", cookie=bob)
+assert code == 200 and h["Content-Type"] == "audio/wav" and appel(f"/api/voix/{v1}/demo")[0] == 401
 assert appel(f"/api/livres/{lid}/audio/1", cookie=alice)[0] == 200
 l = json.loads(appel("/api/livres", cookie=alice)[1])[0]
-assert l["audio_etat"] == "pret" and l["audio_faits"] == 2
+assert (l["audio_etat"], l["audio_faits"], l["voix"]) == ("pret", 2, v1)
+
+# Changer de voix refait tout le livre
+assert appel(f"/api/livres/{lid}/audio", {"voix": v2}, cookie=alice)[0] == 200
+assert base.fichier_audio(None, lid, 0) is None and travaux._tour() is True
+assert base.etat_audio(lid) == "pret" and sum(base.VOIX_DEPART[1][1] in c for _, c in recu[-2:]) == 2
 s2 = json.loads(appel("/api/admin/srv02", cookie=admin)[1])
 assert s2["configure"] and s2["voicestudio"] and s2["file"] == 0
-assert appel("/api/admin/voix/essai", {"texte": "Essai."}, cookie=admin)[0] == 200
 assert appel("/api/admin/srv02", {"action": "eteindre"}, cookie=admin)[0] == 502   # pas de jeton Proxmox ici
 
-# Avec VoiceStudio configuré, un nouvel import part directement dans la file
+# Catalogue géré par l'admin : essai, ajout (avec sa démo), suppression
+assert appel("/api/admin/voix", cookie=alice)[0] == 403
+assert appel("/api/admin/voix", {"nom": "X", "instruct": "male", "seed": "1"}, cookie=alice)[0] == 403
+assert appel("/api/admin/voix/essai", {"instruct": "female, child", "seed": "abc"}, cookie=admin)[0] == 400
+assert appel("/api/admin/voix/essai", {"instruct": "female, child", "seed": "3"}, cookie=admin)[0] == 200
+assert appel("/api/admin/voix", {"nom": "", "instruct": "female, child", "seed": "3"}, cookie=admin)[0] == 400
+code, corps, _ = appel("/api/admin/voix", {"nom": "Enfant", "instruct": "female, child", "seed": "3"}, cookie=admin)
+assert code == 201
+v3 = json.loads(corps)["id"]
+assert base.fichier_demo(v3) and len(json.loads(appel("/api/admin/voix", cookie=admin)[1])) == len(base.VOIX_DEPART) + 1
+
+# Un nouvel import n'est pas transformé tant que la personne ne l'a pas demandé
 code, corps, _ = appel("/api/livres", cookie=bob, brut=doc.tobytes(), entetes={"Content-Type": "application/pdf", "X-Nom": "B.pdf"})
 lid_bob = json.loads(corps)["id"]
-assert base.etat_audio(lid_bob) == "attente" and base.file_audio() == 1
+assert base.etat_audio(lid_bob) is None and base.file_audio() == 0
+assert appel(f"/api/livres/{lid_bob}/audio", {"voix": v3}, cookie=bob)[0] == 200
+assert appel(f"/api/admin/voix/{v3}", cookie=admin, methode="DELETE")[0] == 409   # un livre l'attend encore
+assert travaux._tour() is True and base.fichier_audio(None, lid_bob, 0)
+assert appel(f"/api/admin/voix/{v3}", cookie=admin, methode="DELETE")[0] == 200
+assert json.loads(appel(f"/api/livres/{lid_bob}", cookie=bob)[1])["voix"] is None   # l'audio déjà fait reste
+assert appel(f"/api/livres/{lid_bob}/audio", cookie=bob, methode="DELETE")[0] == 200
+assert base.etat_audio(lid_bob) is None and base.fichier_audio(None, lid_bob, 0) is None
+assert appel(f"/api/livres/{lid_bob}/audio", {"voix": v1}, cookie=bob)[0] == 200
 assert travaux._tour() is True and base.fichier_audio(None, lid_bob, 0)
 faux.shutdown()
 
@@ -209,8 +251,8 @@ travaux.SRV02_MAC, travaux.PVE_JETON, travaux.DELAI_EXTINCTION = "8c:89:a5:c2:03
 travaux.etat.update(eteint_manuel=True, reveil_envoye=0.0)
 base.definir_audio(lid_bob, "attente")                       # du travail, mais VoiceStudio ne répond plus
 assert travaux._tour() is False and reveils == []            # éteint à la main : la file ne le rallume pas
-travaux.nouveau_livre()
-assert travaux._tour() is False and reveils == [1] and travaux.etat["reveil_auto"]   # un import relance le réveil
+travaux.nouvelle_demande()
+assert travaux._tour() is False and reveils == [1] and travaux.etat["reveil_auto"]   # une demande relance le réveil
 assert travaux._tour() is False and reveils == [1]           # pas un paquet toutes les 15 s
 base.definir_audio(lid_bob, "pret")
 travaux._tour()                                               # plus de travail : compte à rebours de 0 s...
@@ -258,6 +300,57 @@ assert connexion("bob", "mauvaismdp")[0] == 429
 # Déconnexion
 appel("/api/deconnexion", {}, cookie=alice)
 assert appel("/api/livres", cookie=alice)[0] == 401
+
+# Durée de vie : un livre part 1 mois après sa dernière écoute, sa position est gardée 2 mois
+_, alice = connexion("alice", "motdepasse1")
+autre = pymupdf.open()
+autre.new_page().insert_text((72, 72), "Premier. Second. Troisième.")
+autre = autre.tobytes()
+
+
+def importer(nom, pdf=autre):
+    code, corps, _ = appel("/api/livres", cookie=alice, brut=pdf, entetes={"Content-Type": "application/pdf", "X-Nom": nom})
+    assert code == 201, corps
+    return json.loads(corps)
+
+
+def vieillir(lid, jours, colonne="lu_le"):
+    c = sqlite3.connect(base.BASE)
+    c.execute(f"UPDATE livres SET {colonne} = ? WHERE id = ?", (int(time.time()) - jours * 86400, lid))
+    c.commit()
+    c.close()
+
+
+vieux = importer("Vieux.pdf")["id"]
+appel(f"/api/livres/{vieux}/progression", {"phrase": 2, "total": 3, "vitesse": 1.5}, cookie=alice)
+base.ecrire_audio(vieux, 0, b"x", "wav")
+appel(f"/api/livres/{vieux}/couverture", cookie=alice, brut=png, entetes={"Content-Type": "image/png"})
+recent = importer("Récent.pdf", doc.tobytes())["id"]
+jamais_lu = importer("Jamais lu.pdf", doc.tobytes())["id"]
+en_cours = importer("En cours.pdf", doc.tobytes())["id"]
+vieillir(vieux, 31)
+vieillir(recent, 29)
+vieillir(jamais_lu, 31, "ajoute_le")
+vieillir(en_cours, 31)
+base.definir_audio(en_cours, "encours")
+assert base.purger() == 2
+restants = {l["id"] for l in json.loads(appel("/api/livres", cookie=alice)[1])}
+assert vieux not in restants and jamais_lu not in restants and {recent, en_cours} <= restants
+assert not (base.AUDIO / str(vieux)).exists() and not list(base.COUVERTURES.iterdir())
+assert not (base.LIVRES / str(alice_id) / f"{vieux}.pdf").exists()
+r = importer("Vieux (encore).pdf")                       # même PDF réimporté : la position revient
+assert r["repris"] is True
+retrouve = json.loads(appel(f"/api/livres/{r['id']}", cookie=alice)[1])
+assert (retrouve["phrase"], retrouve["vitesse"]) == (2, 1.5) and retrouve["lu_le"]
+assert importer("Vieux (3).pdf")["repris"] is False      # une position ne sert qu'une fois
+vieillir(r["id"], 31)
+base.purger()
+c = sqlite3.connect(base.BASE)
+c.execute("UPDATE positions_gardees SET lu_le = ?", (int(time.time()) - 61 * 86400,))
+c.commit()
+c.close()
+base.purger()                                             # plus de 2 mois après la dernière écoute : oubliée
+assert importer("Vieux (4).pdf")["repris"] is False
 
 # Migration : un livre importé avant le découpage serveur est découpé au démarrage, sa progression recalée
 c = sqlite3.connect(base.BASE)

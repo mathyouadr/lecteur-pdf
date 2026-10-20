@@ -107,7 +107,14 @@ h2 { font-size: 22px; margin: 36px 0 16px; }
 .livre:hover .couv, .livre:focus-visible .couv { transform: translateY(-4px); box-shadow: 0 22px 40px rgba(0, 0, 0, .6), 0 0 30px var(--lueur); }
 .livre .nom { margin-top: 10px; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .livre .etat { font-size: 12px; color: var(--doux); }
-.livre .audio { font-size: 12px; color: var(--accent); }
+.livre .audio { font-size: 12px; color: var(--accent); background: none; border: 0; padding: 2px 0; text-align: left; }
+.livre .audio:hover { background: none; text-decoration: underline; }
+dialog { background: #16142a; color: var(--texte); border: 1px solid var(--bord); border-radius: 18px; padding: 24px; width: min(460px, calc(100% - 32px)); }
+dialog::backdrop { background: rgba(0, 0, 0, .65); }
+dialog h2 { margin-top: 0; }
+.choix { display: flex; align-items: center; gap: 10px; padding: 10px 14px; border-radius: 12px; background: var(--verre); border: 1px solid var(--bord); margin-bottom: 8px; cursor: pointer; }
+.choix span { flex: 1; }
+.choix input { accent-color: var(--accent); }
 .livre .suppr, .livre .image-btn {
   position: absolute; top: 8px; right: 8px; z-index: 2; width: 30px; height: 30px; padding: 0; border-radius: 50%;
   background: rgba(0, 0, 0, .55); border: 0; color: #fff; opacity: 0; transition: opacity .2s;

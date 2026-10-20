@@ -17,8 +17,15 @@ BASE = DONNEES / "lecteur.db"
 LIVRES = DONNEES / "livres"            # LIVRES/<uid>/<lid>.pdf
 AUDIO = DONNEES / "audio"              # AUDIO/<lid>/<n° de phrase>.mp3 (ou .wav sans ffmpeg)
 COUVERTURES = DONNEES / "couvertures"  # COUVERTURES/<lid>.<jpg|png|webp>
+VOIX = DONNEES / "voix"                # VOIX/<id>.mp3 : démo de chaque voix du catalogue
 DUREE_SESSION = 30 * 86400
 EXTENSIONS_AUDIO = ("mp3", "wav")
+DUREE_LIVRE = 30 * 86400           # un livre (PDF, audio, couverture) part 1 mois après sa dernière écoute
+DUREE_PROGRESSION = 60 * 86400     # sa position reste gardée 2 mois après cette dernière écoute
+
+# Voix de départ du catalogue (vocabulaire de « voice design » d'OmniVoice), modifiable depuis le panel admin
+VOIX_DEPART = [("Homme grave", "male, middle-aged, low pitch", "42"), ("Femme douce", "female, young adult", "7"),
+               ("Homme jeune", "male, young adult", "11"), ("Femme âgée", "female, elderly", "23")]
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS utilisateurs (
@@ -54,9 +61,22 @@ CREATE TABLE IF NOT EXISTS ecoutes (
     phrases INTEGER NOT NULL DEFAULT 0
 );
 CREATE UNIQUE INDEX IF NOT EXISTS ecoutes_cle ON ecoutes (utilisateur, livre, jour);
-CREATE TABLE IF NOT EXISTS reglages (
-    cle TEXT PRIMARY KEY,
-    valeur TEXT NOT NULL
+CREATE TABLE IF NOT EXISTS voix (
+    id INTEGER PRIMARY KEY,
+    nom TEXT NOT NULL,
+    instruct TEXT NOT NULL,
+    seed TEXT NOT NULL,
+    demo TEXT                          -- extension du fichier de démo, NULL tant qu'elle n'est pas générée
+);
+-- Position d'un livre supprimé (1 mois sans écoute) : retrouvée si la personne réimporte le même PDF
+CREATE TABLE IF NOT EXISTS positions_gardees (
+    utilisateur INTEGER NOT NULL REFERENCES utilisateurs(id) ON DELETE CASCADE,
+    empreinte TEXT NOT NULL,
+    phrase INTEGER NOT NULL,
+    total INTEGER NOT NULL,
+    vitesse REAL NOT NULL,
+    lu_le INTEGER NOT NULL,
+    PRIMARY KEY (utilisateur, empreinte)
 );
 """
 
@@ -64,11 +84,12 @@ CREATE TABLE IF NOT EXISTS reglages (
 COLONNES_LIVRES = {
     "phrases": "TEXT",                  # JSON : une liste de phrases par paragraphe (découpage serveur)
     "couverture": "TEXT",               # extension de l'image importée, NULL = couverture générée
+    "empreinte": "TEXT",                # SHA-256 du PDF, pour reconnaître un livre réimporté
+    "voix": "INTEGER",                  # voix choisie pour le livre audio (id du catalogue)
     "audio_etat": "TEXT",               # NULL, attente, encours, pause, pret, erreur
     "audio_faits": "INTEGER NOT NULL DEFAULT 0",
     "audio_erreur": "TEXT",
 }
-ETATS_AUDIO = ("attente", "encours", "pause", "pret", "erreur")
 
 
 def _sql(requete, params=()):
@@ -85,7 +106,7 @@ def _sql(requete, params=()):
 
 
 def initialiser():
-    for dossier in (LIVRES, AUDIO, COUVERTURES):
+    for dossier in (LIVRES, AUDIO, COUVERTURES, VOIX):
         dossier.mkdir(parents=True, exist_ok=True)
     c = sqlite3.connect(BASE)
     c.executescript(SCHEMA)
@@ -103,8 +124,18 @@ def initialiser():
             phrase = n if phrase >= total else min(round(phrase * n / total), n)
         c.execute("UPDATE livres SET phrases = ?, phrase = ?, total = ? WHERE id = ?",
                   (json.dumps(decoupe, ensure_ascii=False), phrase, n, lid))
+    for lid, uid in c.execute("SELECT id, utilisateur FROM livres WHERE empreinte IS NULL").fetchall():
+        pdf = LIVRES / str(uid) / f"{lid}.pdf"
+        if pdf.exists():
+            c.execute("UPDATE livres SET empreinte = ? WHERE id = ?", (_empreinte_pdf(pdf.read_bytes()), lid))
+    if not c.execute("SELECT 1 FROM voix").fetchone():
+        c.executemany("INSERT INTO voix (nom, instruct, seed) VALUES (?, ?, ?)", VOIX_DEPART)
     c.commit()
     c.close()
+
+
+def _empreinte_pdf(pdf):
+    return hashlib.sha256(pdf).hexdigest()
 
 
 # ---------- Mots de passe ----------
@@ -187,7 +218,7 @@ def fermer_session(jeton):
 
 # ---------- Livres ----------
 # Dans les fonctions qui prennent uid : uid=None veut dire « l'admin, quel que soit le propriétaire ».
-CHAMPS_LISTE = "id, titre, phrase, total, vitesse, lu_le, ajoute_le, couverture, audio_etat, audio_faits"
+CHAMPS_LISTE = "id, titre, phrase, total, vitesse, lu_le, ajoute_le, couverture, voix, audio_etat, audio_faits"
 
 
 def _proprio(uid, colonne="utilisateur"):
@@ -229,17 +260,41 @@ def phrases_a_plat(lid):
     return [p for para in json.loads(lignes[0]["phrases"]) for p in para] if lignes else []
 
 
-def ajouter_livre(uid, titre, paragraphes, pdf, audio=False):
-    """audio=True : le livre audio est mis en file de génération dès l'import."""
+def ajouter_livre(uid, titre, paragraphes, pdf):
+    """Renvoie (id, repris) : repris=True si la position gardée d'un livre supprimé a été retrouvée."""
     decoupe = [decouper(p) for p in paragraphes]
-    lid = _sql("""INSERT INTO livres (utilisateur, titre, paragraphes, phrases, total, audio_etat, ajoute_le)
-                  VALUES (?, ?, ?, ?, ?, ?, ?)""",
+    empreinte = _empreinte_pdf(pdf)
+    gardee = _sql("SELECT phrase, total, vitesse FROM positions_gardees WHERE utilisateur = ? AND empreinte = ?",
+                  (uid, empreinte))[0]
+    phrase, vitesse, lu_le = (gardee[0]["phrase"], gardee[0]["vitesse"], int(time.time())) if gardee else (0, 1, None)
+    lid = _sql("""INSERT INTO livres (utilisateur, titre, paragraphes, phrases, total, empreinte, phrase, vitesse, lu_le, ajoute_le)
+                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                (uid, titre, json.dumps(paragraphes, ensure_ascii=False), json.dumps(decoupe, ensure_ascii=False),
-                sum(map(len, decoupe)), "attente" if audio else None, int(time.time())))[1]
+                sum(map(len, decoupe)), empreinte, phrase, vitesse, lu_le, int(time.time())))[1]
+    if gardee:
+        _sql("DELETE FROM positions_gardees WHERE utilisateur = ? AND empreinte = ?", (uid, empreinte))
     dossier = LIVRES / str(uid)
     dossier.mkdir(exist_ok=True)
     (dossier / f"{lid}.pdf").write_bytes(pdf)  # gardé pour pouvoir ré-extraire si l'extraction s'améliore
-    return lid
+    return lid, bool(gardee)
+
+
+def purger(maintenant=None):
+    """Supprime les livres pas écoutés depuis 1 mois (leur position est gardée), puis les positions gardées
+    depuis plus de 2 mois après la dernière écoute. Un livre audio en cours de génération n'est jamais supprimé."""
+    maintenant = maintenant or time.time()
+    vieux = _sql("""SELECT id, utilisateur, empreinte, phrase, total, vitesse, COALESCE(lu_le, ajoute_le) lu_le
+                    FROM livres WHERE COALESCE(lu_le, ajoute_le) < ? AND COALESCE(audio_etat, '') != 'encours'""",
+                 (maintenant - DUREE_LIVRE,))[0]
+    for l in vieux:
+        if l["empreinte"] and l["phrase"] > 0:
+            _sql("""INSERT INTO positions_gardees VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT (utilisateur, empreinte) DO UPDATE SET phrase = excluded.phrase,
+                    total = excluded.total, vitesse = excluded.vitesse, lu_le = excluded.lu_le""",
+                 (l["utilisateur"], l["empreinte"], l["phrase"], l["total"], l["vitesse"], l["lu_le"]))
+        supprimer_livre(None, l["id"])
+    _sql("DELETE FROM positions_gardees WHERE lu_le < ?", (maintenant - DUREE_PROGRESSION,))
+    return len(vieux)
 
 
 def sauver_progression(uid, lid, phrase, total, vitesse):
@@ -314,13 +369,36 @@ def definir_audio(lid, etat, erreur=None):
     _sql("UPDATE livres SET audio_etat = ?, audio_erreur = ?, audio_faits = ? WHERE id = ?", (etat, erreur, faits, lid))
 
 
+def lancer_audio(uid, lid, voix_id):
+    """La personne demande son livre audio avec cette voix. Changer de voix refait tout le livre.
+    Renvoie False si le livre ou la voix n'existe pas (ou si le livre n'est pas à uid)."""
+    filtre, p = _proprio(uid)
+    lignes, _ = _sql(f"SELECT voix FROM livres WHERE id = ? AND {filtre}", (lid, *p))
+    if not lignes or not voix(voix_id):
+        return False
+    if lignes[0]["voix"] != voix_id:
+        definir_audio(lid, None)
+        _sql("UPDATE livres SET voix = ? WHERE id = ?", (voix_id, lid))
+    definir_audio(lid, "attente")
+    return True
+
+
+def annuler_audio(uid, lid):
+    filtre, p = _proprio(uid)
+    if not _sql(f"SELECT 1 FROM livres WHERE id = ? AND {filtre}", (lid, *p))[0]:
+        return False
+    definir_audio(lid, None)
+    _sql("UPDATE livres SET voix = NULL WHERE id = ?", (lid,))
+    return True
+
+
 def compter_audio(lid):
     _sql("UPDATE livres SET audio_faits = ? WHERE id = ?", (len(_fichiers_audio(lid)), lid))
 
 
 def prochain_travail():
     """Le plus ancien livre en attente de génération (un livre « encours » repris après un redémarrage d'abord)."""
-    lignes, _ = _sql("""SELECT id, phrase FROM livres WHERE audio_etat IN ('encours', 'attente')
+    lignes, _ = _sql("""SELECT id, phrase, voix FROM livres WHERE audio_etat IN ('encours', 'attente')
                         ORDER BY audio_etat = 'encours' DESC, id LIMIT 1""")
     return lignes[0] if lignes else None
 
@@ -334,14 +412,46 @@ def file_audio():
     return _sql("SELECT COUNT(*) n FROM livres WHERE audio_etat IN ('encours', 'attente')")[0][0]["n"]
 
 
-# ---------- Réglages (voix IA choisie par l'admin) ----------
-def reglage(cle, defaut=None):
-    lignes, _ = _sql("SELECT valeur FROM reglages WHERE cle = ?", (cle,))
-    return lignes[0]["valeur"] if lignes else defaut
+# ---------- Catalogue de voix (géré par l'admin) ----------
+def liste_voix():
+    return _sql("SELECT id, nom, instruct, seed, demo IS NOT NULL demo FROM voix ORDER BY id")[0]
 
 
-def definir_reglage(cle, valeur):
-    _sql("INSERT INTO reglages VALUES (?, ?) ON CONFLICT (cle) DO UPDATE SET valeur = excluded.valeur", (cle, valeur))
+def voix(voix_id):
+    lignes, _ = _sql("SELECT * FROM voix WHERE id = ?", (voix_id,))
+    return lignes[0] if lignes else None
+
+
+def ajouter_voix(nom, instruct, seed, demo, extension):
+    vid = _sql("INSERT INTO voix (nom, instruct, seed) VALUES (?, ?, ?)", (nom, instruct, seed))[1]
+    definir_demo(vid, demo, extension)
+    return vid
+
+
+def definir_demo(voix_id, demo, extension):
+    (VOIX / f"{voix_id}.{extension}").write_bytes(demo)
+    _sql("UPDATE voix SET demo = ? WHERE id = ?", (extension, voix_id))
+
+
+def fichier_demo(voix_id):
+    v = voix(voix_id)
+    return VOIX / f"{voix_id}.{v['demo']}" if v and v["demo"] else None
+
+
+def voix_sans_demo():
+    return _sql("SELECT * FROM voix WHERE demo IS NULL")[0]
+
+
+def supprimer_voix(voix_id):
+    """Refuse (False) si des livres attendent encore d'être générés avec cette voix."""
+    if _sql("SELECT 1 FROM livres WHERE voix = ? AND audio_etat IN ('attente', 'encours', 'pause')", (voix_id,))[0]:
+        return False
+    v = voix(voix_id)
+    if v and v["demo"]:
+        (VOIX / f"{voix_id}.{v['demo']}").unlink(missing_ok=True)
+    _sql("UPDATE livres SET voix = NULL WHERE voix = ?", (voix_id,))
+    _sql("DELETE FROM voix WHERE id = ?", (voix_id,))
+    return True
 
 
 # ---------- Statistiques ----------
