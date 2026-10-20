@@ -241,7 +241,49 @@ assert appel(f"/api/livres/{lid_bob}/audio", cookie=bob, methode="DELETE")[0] ==
 assert base.etat_audio(lid_bob) is None and base.fichier_audio(None, lid_bob, 0) is None
 assert appel(f"/api/livres/{lid_bob}/audio", {"voix": v1}, cookie=bob)[0] == 200
 assert travaux._tour() is True and base.fichier_audio(None, lid_bob, 0)
+
+# Écouter pendant la génération : une phrase pas encore prête est générée à la demande et mise en stock
+long = pymupdf.open()
+long.new_page().insert_text((72, 72), "Un. Deux. Trois. Quatre. Cinq. Six. Sept. Huit.")
+code, corps, _ = appel("/api/livres", cookie=bob, brut=long.tobytes(), entetes={"Content-Type": "application/pdf", "X-Nom": "Long.pdf"})
+lid_long = json.loads(corps)["id"]
+proprio_long = base.livre(None, lid_long)["utilisateur"]
+assert base.livre(None, lid_long)["total"] == 8
+assert appel(f"/api/livres/{lid_long}/audio/3", cookie=bob)[0] == 404       # pas de livre audio demandé : voix Google
+assert appel(f"/api/livres/{lid_long}/audio", {"voix": v1}, cookie=bob)[0] == 200
+avant = len(recu)
+code, corps, _ = appel(f"/api/livres/{lid_long}/audio/3", cookie=bob)
+assert code == 200 and base.fichier_audio(None, lid_long, 3) and len(recu) == avant + 1 and "Quatre." in recu[-1][1]
+assert appel(f"/api/livres/{lid_long}/audio/3", cookie=bob)[0] == 200 and len(recu) == avant + 1   # servi du stock
+assert appel(f"/api/livres/{lid_long}/audio/99", cookie=bob)[0] == 404
+assert appel(f"/api/livres/{lid_long}/audio/3", cookie=alice)[0] == 404     # pas son livre
+
+# La file suit l'auditeur : il saute à la phrase 6 pendant la génération, elle repart de là
+ordre, original = [], travaux.synthese_ia
+
+
+def suivi(texte, v, delai=300):
+    ordre.append(texte)
+    if len(ordre) == 1:
+        base.sauver_progression(proprio_long, lid_long, 5, 8, 1)
+    return original(texte, v, delai)
+
+
+travaux.synthese_ia = suivi
+assert travaux._tour() is True
+travaux.synthese_ia = original
+assert ordre == ["Un.", "Six.", "Sept.", "Huit.", "Deux.", "Trois.", "Cinq."], ordre   # « Quatre. » était en stock
+assert base.etat_audio(lid_long) == "pret" and base.phrases_generees(lid_long) == set(range(8))
 faux.shutdown()
+
+# srv-02 éteint : pas d'audio IA à la demande, réponse rapide pour que le lecteur passe vite sur Google
+assert appel(f"/api/livres/{lid_long}/audio", {"voix": v2}, cookie=bob)[0] == 200
+travaux.etat.update(vs_vu=0.0)
+debut = time.time()
+assert appel(f"/api/livres/{lid_long}/audio/0", cookie=bob)[0] == 404 and time.time() - debut < 4
+debut = time.time()
+assert appel(f"/api/livres/{lid_long}/audio/1", cookie=bob)[0] == 404 and time.time() - debut < 1   # état mémorisé
+assert appel(f"/api/livres/{lid_long}/audio", cookie=bob, methode="DELETE")[0] == 200
 
 # Réveil et extinction de srv-02 (paquet Wake-on-LAN et API Proxmox simulés)
 reveils, extinctions = [], []

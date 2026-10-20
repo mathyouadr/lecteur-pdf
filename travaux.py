@@ -43,8 +43,10 @@ ESSAIS_PAR_PHRASE = 3
 # reveil_auto : c'est la file qui a réveillé srv-02 (donc elle l'éteindra) ; manuel : allumé depuis le panel ;
 # eteint_manuel : éteint depuis le panel, la file ne le rallume pas avant le prochain import ou un réveil manuel
 etat = {"message": "", "reveil_auto": False, "manuel": False, "eteint_manuel": False,
-        "inactif_depuis": None, "reveil_envoye": 0.0}
+        "inactif_depuis": None, "reveil_envoye": 0.0, "vs_ok": False, "vs_vu": 0.0}
 verrou = threading.Lock()
+en_generation = set()          # (livre, phrase) en cours de génération, par la file ou à la demande du lecteur
+verrou_phrases = threading.Lock()
 
 
 def actif():
@@ -56,12 +58,18 @@ def extinction_possible():
 
 
 # ---------- srv-02 ----------
-def voicestudio_pret():
+def voicestudio_pret(recent=0):
+    """recent=N : réutilise la dernière réponse si elle a moins de N secondes (évite d'attendre 3 s par phrase
+    quand srv-02 dort et que le lecteur demande l'audio)."""
+    if recent and time.time() - etat["vs_vu"] < recent:
+        return etat["vs_ok"]
     try:
         with urllib.request.urlopen(f"{VOICESTUDIO_URL}/health", timeout=3) as r:
-            return json.loads(r.read()).get("status") == "ok"
+            ok = json.loads(r.read()).get("status") == "ok"
     except (OSError, ValueError):
-        return False
+        ok = False
+    etat.update(vs_ok=ok, vs_vu=time.time())
+    return ok
 
 
 def reveiller():
@@ -119,19 +127,55 @@ def _multipart(champs):
     return corps + f"--{borne}--\r\n".encode(), f"multipart/form-data; boundary={borne}"
 
 
-def synthese_ia(texte, v):
+def synthese_ia(texte, v, delai=300):
     """Une phrase avec la voix v (instruct, seed). Renvoie (octets, extension) : MP3 si ffmpeg est installé,
     sinon le WAV brut."""
     corps, type_ = _multipart({"text": texte, "language": "French", "instruct": v["instruct"], "seed": v["seed"]})
     req = urllib.request.Request(f"{VOICESTUDIO_URL}/generate", data=corps, method="POST",
                                  headers={"Content-Type": type_, "Authorization": f"Bearer {VOICESTUDIO_CLE}"})
-    with urllib.request.urlopen(req, timeout=300) as r:
+    with urllib.request.urlopen(req, timeout=delai) as r:
         wav = r.read()
     if not shutil.which("ffmpeg"):
         return wav, "wav"  # ponytail: ~10× plus lourd que le MP3, installer ffmpeg en production
     mp3 = subprocess.run(["ffmpeg", "-loglevel", "error", "-i", "pipe:0", "-ac", "1", "-b:a", "48k", "-f", "mp3", "pipe:1"],
                          input=wav, capture_output=True, check=True).stdout
     return mp3, "mp3"
+
+
+def generer_phrase(lid, n, texte, v, delai=300):
+    """Génère et range l'audio d'une phrase. Une même phrase n'est jamais générée deux fois en même temps :
+    si la file s'en occupe déjà, on attend son fichier. Renvoie le fichier, ou None (lève l'erreur de VoiceStudio)."""
+    with verrou_phrases:
+        deja = (lid, n) in en_generation
+        en_generation.add((lid, n))
+    if deja:
+        fin = time.time() + delai
+        while (lid, n) in en_generation and time.time() < fin:
+            time.sleep(0.2)
+        return base.fichier_audio(None, lid, n)
+    try:
+        base.ecrire_audio(lid, n, *synthese_ia(texte[:2000], v, delai))
+    finally:
+        with verrou_phrases:
+            en_generation.discard((lid, n))
+    return base.fichier_audio(None, lid, n)
+
+
+def phrase_a_la_demande(lid, n):
+    """Le lecteur veut la phrase n et elle n'est pas encore prête : on la génère tout de suite (1 à 2 s sur la
+    GPU) et elle reste en stock. None si ce n'est pas possible maintenant (srv-02 endormi, pas de voix choisie) :
+    le lecteur passe alors sur la voix Google pour cette phrase."""
+    info = base.info_audio(lid)
+    if not (actif() and info and info["voix"] and info["audio_etat"] in ("attente", "encours", "erreur")):
+        return None
+    v = base.voix(info["voix"])
+    phrases = base.phrases_a_plat(lid)
+    if not v or not 0 <= n < len(phrases) or not voicestudio_pret(recent=10):
+        return None
+    try:
+        return generer_phrase(lid, n, phrases[n], v, delai=30)
+    except (OSError, subprocess.CalledProcessError, ValueError):
+        return None
 
 
 # ---------- File de génération ----------
@@ -157,18 +201,38 @@ def _attendre_srv02():
     return False
 
 
-def _generer(lid, depart, v):
-    """Génère les phrases manquantes, en commençant à « depart ». Renvoie l'état final, ou None pour réessayer."""
+def _suivante(faites, position):
+    """Prochaine phrase à générer : la première manquante à partir de là où la personne écoute, sinon depuis le début."""
+    total = len(faites)
+    position = min(max(position, 0), total)
+    return next((n for n in [*range(position, total), *range(position)] if not faites[n]), None)
+
+
+def _generer(lid, v):
+    """Génère tout le livre en suivant l'auditeur : avant chaque phrase, on relit sa position, pour que ce
+    qu'il va entendre soit prêt avant lui. Continue jusqu'au bout même quand personne n'écoute.
+    Renvoie l'état final, ou None pour réessayer plus tard."""
     phrases = base.phrases_a_plat(lid)
-    ordre = list(range(min(depart, len(phrases)), len(phrases))) + list(range(min(depart, len(phrases))))
-    for compte, n in enumerate(ordre):
+    faites = [False] * len(phrases)
+    for n in base.phrases_generees(lid):
+        if n < len(faites):
+            faites[n] = True
+    compte = 0
+    while True:
         if base.etat_audio(lid) != "encours":       # mis en pause, annulé ou livre supprimé pendant ce temps
             return base.etat_audio(lid)
-        if base.fichier_audio(None, lid, n):
+        n = _suivante(faites, base.position(lid))
+        if n is None:
+            manquantes = set(range(len(phrases))) - base.phrases_generees(lid)
+            if not manquantes:
+                return "pret"
+            for m in manquantes:                      # une génération à la demande a échoué entre-temps
+                faites[m] = False
             continue
+        faites[n] = True
         for essai in range(ESSAIS_PAR_PHRASE):
             try:
-                base.ecrire_audio(lid, n, *synthese_ia(phrases[n][:2000], v))
+                generer_phrase(lid, n, phrases[n], v)
                 break
             except (OSError, subprocess.CalledProcessError, ValueError) as e:
                 if not voicestudio_pret():
@@ -176,9 +240,9 @@ def _generer(lid, depart, v):
                 if essai == ESSAIS_PAR_PHRASE - 1:
                     return f"erreur:{type(e).__name__} sur la phrase {n + 1} : {e}"[:300]
                 time.sleep(5)
+        compte += 1
         if compte % 10 == 0:
             base.compter_audio(lid)
-    return "pret"
 
 
 def _demos():
@@ -216,7 +280,7 @@ def _tour():
         base.definir_audio(travail["id"], "erreur", "Cette voix n'existe plus : choisis-en une autre.")
         return True
     base.definir_audio(travail["id"], "encours")
-    fin = _generer(travail["id"], travail["phrase"], v)
+    fin = _generer(travail["id"], v)
     if fin is None:
         return False
     if fin == "pret":
