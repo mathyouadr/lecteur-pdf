@@ -18,6 +18,7 @@
       <option value="1.5">1,5×</option><option value="1.75">1,75×</option><option value="2">2×</option>
       <option value="2.5">2,5×</option><option value="3">3×</option><option value="4">4×</option><option value="5">5×</option>
     </select>
+    <span class="discret" id="voix" title="Voix de la phrase en cours"></span>
   </div>
   <div class="avance"><i id="avance"></i></div>
 </header>
@@ -34,6 +35,7 @@ let enLecture = false;
 let audio = null;
 let cache = new Map();     // index -> Promise<URL audio>
 let generation = 0;        // invalide les lectures en cours quand on saute ou change de réglage
+let lectureSeule = false;  // l'admin écoute le livre de quelqu'un : on ne touche pas à sa progression
 
 // ---------- Chargement du livre ----------
 api(`/api/livres/${idLivre}`).then(livre => {
@@ -41,21 +43,24 @@ api(`/api/livres/${idLivre}`).then(livre => {
   $("titre").textContent = livre.titre;
   $("vitesse").value = [...$("vitesse").options].some(o => +o.value === livre.vitesse) ? String(livre.vitesse) : "1";
   afficher(livre.paragraphes);
+  lectureSeule = livre.lecture_seule;
   courant = Math.min(livre.phrase, phrases.length - 1);
   marquer();
-  $("etat").textContent = livre.phrase ? "Reprise là où tu t'étais arrêté. Clique une phrase pour lire à partir de là."
-                                       : "Clique une phrase pour lire à partir de là, ou appuie sur Espace.";
+  $("etat").textContent = lectureSeule
+    ? `Livre de ${livre.proprietaire}, ouvert en lecture seule : sa progression et ses stats ne changent pas.`
+    : livre.phrase ? "Reprise là où tu t'étais arrêté. Clique une phrase pour lire à partir de là."
+                   : "Clique une phrase pour lire à partir de là, ou appuie sur Espace.";
 }).catch(err => { $("etat").textContent = err.message; $("etat").className = "message erreur"; });
 
+// Les phrases sont découpées par le serveur : le numéro de phrase est le même pour la voix Google,
+// pour les fichiers du livre audio IA et pour la progression enregistrée.
 function afficher(paragraphes) {
   const zone = $("texte");
-  const decoupe = new Intl.Segmenter("fr", { granularity: "sentence" });
   for (const para of paragraphes) {
     const p = document.createElement("p");
-    for (const { segment } of decoupe.segment(para)) {
-      if (!segment.trim()) continue;
+    for (const phrase of para) {
       const s = document.createElement("span");
-      s.textContent = segment;
+      s.textContent = phrase + " ";
       const i = phrases.length;
       s.onclick = () => lireDepuis(i);
       phrases.push(s);
@@ -100,14 +105,21 @@ function sauver() {
                   secondes: Math.round(ecoute * 10) / 10, phrases_lues: phrasesLues };
   ecoute = 0;
   phrasesLues = 0;
+  if (lectureSeule) return;
   api(`/api/livres/${idLivre}/progression`, envoi(corps, { keepalive: true })).catch(() => {});
 }
 addEventListener("pagehide", sauver);
 
 // ---------- Synthèse et lecture ----------
+// Audio de la phrase i : le fichier du livre audio IA s'il est déjà généré, sinon la voix Google à la volée
 function son(i) {
   if (!cache.has(i)) {
-    cache.set(i, api("/api/tts", envoi({ texte: phrases[i].textContent })).then(b => URL.createObjectURL(b)));
+    cache.set(i, (async () => {
+      const r = await fetch(`/api/livres/${idLivre}/audio/${i}`);
+      if (r.ok) return { url: URL.createObjectURL(await r.blob()), ia: true };
+      const b = await api("/api/tts", envoi({ texte: phrases[i].textContent }));
+      return { url: URL.createObjectURL(b), ia: false };
+    })());
   }
   return cache.get(i);
 }
@@ -117,10 +129,11 @@ async function boucle(gen) {
     marquer();
     sauver();
     for (let k = 1; k <= 2 && courant + k < phrases.length; k++) son(courant + k).catch(() => {}); // précharge la suite
-    let url;
-    try { url = await son(courant); }
+    let url, ia;
+    try { ({ url, ia } = await son(courant)); }
     catch (err) { cache.delete(courant); $("etat").textContent = err.message; return pause(); }
     if (gen !== generation) return;
+    $("voix").textContent = ia ? "Voix IA" : "Voix Google";
     audio = new Audio(url);
     audio.playbackRate = +$("vitesse").value;   // le navigateur garde la hauteur de la voix
     suivre(audio);
